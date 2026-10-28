@@ -2,8 +2,6 @@ import { sql } from 'drizzle-orm';
 
 import type { Database } from '../client';
 
-// Optional singleton primitive (e.g. one active worker per deployment);
-// runWorker does not depend on it.
 export async function tryAcquireWorkerLease(
   db: Database,
   name: string,

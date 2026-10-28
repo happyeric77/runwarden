@@ -1,7 +1,3 @@
-/**
- * Durable-mode app: enqueues one invocation and waits for a worker to
- * execute it. Start worker.ts first (or the invocation stays queued).
- */
 import { createDb, defineRuntime } from '../../src/index';
 
 const connectionString = process.env.DATABASE_URL;

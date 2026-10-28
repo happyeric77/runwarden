@@ -22,8 +22,7 @@ const LEDGER_DDL = `
   )
 `;
 
-// The ledger lives in the runtime schema, so the schema is created before
-// the first migration file (which also creates it, idempotently) runs.
+// The ledger needs its schema before the first migration runs.
 export async function initDb(
   handle: DatabaseHandle,
   options: InitOptions = {},

@@ -2,18 +2,21 @@
 
 The smallest durable setup: invocations are queued in Postgres, a worker
 process claims and executes them under lease, and `invoke()` in the app
-process waits for the result. Kill the worker mid-flight and another worker
-picks the invocation up — nothing is lost, nothing runs twice.
+process waits for the result. Another worker can reclaim an expired lease.
+Execution is at-least-once: work may repeat after a crash, so tool side effects
+must use stable idempotency keys.
 
 You need an OpenAI-compatible model endpoint. Set `MODEL_BASE_URL`,
 `MODEL_API_KEY`, and `MODEL_ID` in your shell (defaults point at OpenAI).
+Run from the repository root with Node.js 24+, pnpm 10.34.9, and Docker Compose
+installed. Install dependencies first with `pnpm install --frozen-lockfile`.
 
 ## Three steps
 
 1. **Start Postgres** (or point `DATABASE_URL` at any Postgres you own):
 
    ```sh
-   docker compose -f examples/durable/docker-compose.yml up -d postgres
+   docker compose -f examples/durable/docker-compose.yml up --wait postgres
    export DATABASE_URL=postgres://postgres:password@localhost:54329/durable_agent_runtime
    ```
 
@@ -31,14 +34,5 @@ You need an OpenAI-compatible model endpoint. Set `MODEL_BASE_URL`,
    ```
 
 The app prints the invocation id and the worker's result. The invocation,
-its attempts, and every policy decision are in your database
+its attempt count, and policy decisions are in your database
 (`agent_runtime.invocations`, `agent_runtime.policy_decisions`).
-
-## All-in-Docker variant
-
-```sh
-docker compose -f examples/durable/docker-compose.yml up -d postgres worker
-DATABASE_URL=postgres://postgres:password@localhost:54329/durable_agent_runtime \
-  pnpm exec tsx src/cli.ts init
-docker compose -f examples/durable/docker-compose.yml run --rm app
-```

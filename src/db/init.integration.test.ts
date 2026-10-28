@@ -18,10 +18,19 @@ describe('initDb', () => {
     await pg?.stop();
   });
 
-  it('creates the runtime schema on an empty database and is idempotent', async () => {
-    const first = await initDb(handle);
-    expect(first.applied).toEqual(['0000_init.sql']);
-    expect(first.alreadyApplied).toEqual([]);
+  it('initializes an empty database concurrently and is idempotent', async () => {
+    const other = createDb(pg.connectionString);
+    try {
+      const results = await Promise.all([initDb(handle), initDb(other)]);
+      expect(results.flatMap((result) => result.applied)).toEqual([
+        '0000_init.sql',
+      ]);
+      expect(results.flatMap((result) => result.alreadyApplied)).toEqual([
+        '0000_init.sql',
+      ]);
+    } finally {
+      await other.close();
+    }
 
     const tables = await handle.pool.query<{ table_name: string }>(
       `select table_name from information_schema.tables

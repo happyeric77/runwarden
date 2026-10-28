@@ -17,9 +17,7 @@ export interface NativeMcpClientConfig {
   maxResultBytes?: number;
 }
 
-// The MCP SDK signals its own request timeouts with ErrorCode.RequestTimeout
-// (-32001) on an McpError, while aborts surface as AbortError/TimeoutError.
-// Both mean "the MCP side did not answer in time", not "MCP is broken".
+// SDK and transport timeouts must share the timeout error classification.
 function isTimeoutFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
@@ -36,14 +34,12 @@ function required(value: string, name: string): string {
 function isCorrectable(meta: Record<string, unknown> | undefined): boolean {
   if (!meta) return false;
   if (meta[ERROR_CATEGORY_META_KEY] === 'correctable') return true;
-  // Migration compatibility: tool servers built against the pre-extraction
-  // runtime mark correctable errors with the legacy meta key.
+  // Existing tool servers still send the pre-extraction meta key.
   return LEGACY_ERROR_CATEGORY_META_KEYS.some(
     (key) => meta[key] === 'correctable',
   );
 }
 
-/** One session per attempt; `correctable` application errors return to the model as ordinary results. */
 export class NativeMcpClient implements McpToolClient {
   private readonly endpoint: URL;
   private readonly headers: Record<string, string>;

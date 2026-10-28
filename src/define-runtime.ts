@@ -35,8 +35,7 @@ import {
 
 export type { DatabaseHandle } from './db/client';
 
-// In-package channel for runWorker to observe policy decisions; not part of
-// the public API surface (index.ts does not export it).
+// Keep worker subscriptions off the public package surface.
 export const RUNTIME_INTERNALS: unique symbol = Symbol(
   'durable-agent-runtime/internals',
 );
@@ -47,12 +46,10 @@ export interface RuntimeInternals {
 
 export interface DefineRuntimeOptions {
   db?: DatabaseHandle;
-  /** Takes precedence over `provider`. */
   model?: LanguageModel;
   provider?: OpenAiCompatibleModelConfig;
   tools?: ToolDefinition[];
   mcpServers?: McpServerConfig[];
-  /** Bring your own MCP client instead of `mcpServers`. */
   mcpClient?: McpToolClient;
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
@@ -62,9 +59,7 @@ export interface DefineRuntimeOptions {
 }
 
 export interface InvokeOptions {
-  /** Durable mode only: how long invoke() waits for a terminal state before giving up (the invocation itself keeps running). Default `300_000`. */
   waitTimeoutMs?: number;
-  /** Durable mode only: status poll interval. Default `250`. */
   pollIntervalMs?: number;
 }
 
@@ -73,9 +68,7 @@ export interface Runtime {
     input: InvocationInput,
     opts?: InvokeOptions,
   ): Promise<InvocationResult>;
-  /** Durable mode only: enqueue without waiting. */
   enqueue(input: InvocationInput): Promise<{ invocationId: string }>;
-  /** Durable mode only: read one invocation record. */
   getInvocation(id: string): Promise<InvocationRecord | undefined>;
   readonly engine: AgentRuntime;
   readonly [RUNTIME_INTERNALS]?: RuntimeInternals;
@@ -95,8 +88,6 @@ function buildMcpClient(
       }),
   );
   if (clients.length === 1) return clients[0];
-  // Multiple servers: sessions open against every server; per-tool
-  // routing by the servers' `tools` hints is applied by callTool below.
   return new RoutingMcpClient(clients, servers);
 }
 
@@ -167,8 +158,8 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     policies: options.policies,
     onMetrics: options.onMetrics,
     onPolicyDecision: (decision) => {
-      options.onPolicyDecision?.(decision);
       for (const listener of decisionListeners) listener(decision);
+      options.onPolicyDecision?.(decision);
     },
   });
 
@@ -203,7 +194,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
         );
       }
       if (Date.now() >= deadline) {
-        // Timing out here does not cancel the invocation; it stays queued.
+        // A caller's wait deadline must not cancel durable work.
         throw new AgentRuntimeError(
           'timeout',
           `Timed out waiting for invocation ${invocationId}`,
