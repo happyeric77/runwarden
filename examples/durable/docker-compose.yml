@@ -1,0 +1,48 @@
+# Template: Postgres + worker + app for the durable-mode example.
+# The app service is one-shot: `docker compose run --rm app`.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: durable_agent_runtime
+    ports:
+      - '54329:5432'
+    volumes:
+      - dar-postgres:/var/lib/postgresql/data
+
+  worker:
+    image: node:24-alpine
+    working_dir: /app
+    volumes:
+      - ../..:/app
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/durable_agent_runtime
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_ID: ${MODEL_ID:-gpt-4o-mini}
+    depends_on:
+      - postgres
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile
+      && pnpm exec tsx examples/durable/worker.ts"
+
+  app:
+    image: node:24-alpine
+    working_dir: /app
+    volumes:
+      - ../..:/app
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/durable_agent_runtime
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_ID: ${MODEL_ID:-gpt-4o-mini}
+    depends_on:
+      - postgres
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile
+      && pnpm exec tsx examples/durable/app.ts"
+
+volumes:
+  dar-postgres:
