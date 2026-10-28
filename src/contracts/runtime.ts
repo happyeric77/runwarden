@@ -1,26 +1,15 @@
 import type { AgentRuntimeError } from './errors';
 
-/**
- * One unit of agent work, as the host application describes it.
- *
- * `scope` is the single isolation key (ADR-010): it replaces any tenant /
- * user / agent id the host might otherwise model. The library never learns
- * what a scope means; it only guarantees isolation and capability grants
- * are evaluated per scope.
- */
+/** `scope` is the only isolation key; the library never learns what it means. */
 export interface InvocationInput {
   scope: string;
-  /** The user message / task prompt for this invocation. */
   prompt: string;
-  /** Opaque conversation identifier owned by the host, if any. */
   conversationId?: string;
   /** Invocations sharing an ordering key run serially, in enqueue order. */
   orderingKey?: string;
-  /** Arbitrary host context, stored with the invocation input. */
   context?: Record<string, unknown>;
-  /** Enqueue-level deduplication key (unique per scope). */
+  /** Deduplication key, unique per scope. */
   idempotencyKey?: string;
-  /** Delivery attempts before the invocation is failed permanently. */
   maxAttempts?: number;
   metadata?: Record<string, unknown>;
 }
@@ -53,23 +42,16 @@ export interface InvocationRecord extends InvocationInput {
   completedAt?: Date;
 }
 
-/** A framework-neutral chat message, as returned by history loaders. */
 export interface NeutralMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
-/** The full input an execution engine receives for one attempt. */
 export type RuntimeInvocationInput = InvocationInput & {
   invocationId: string;
   runId: string;
 };
 
-/**
- * The stable execution contract (ADR-008). `runWorker` consumes an
- * `AgentRuntime`; host applications normally go through `defineRuntime`
- * instead of implementing this themselves.
- */
 export interface AgentRuntime {
   invoke(input: RuntimeInvocationInput): Promise<InvocationResult>;
 }
@@ -82,7 +64,6 @@ export type HistoryLoader = (
   input: RuntimeInvocationInput,
 ) => Promise<readonly NeutralMessage[]>;
 
-/** One open connection to an MCP tool server, bound to a single run. */
 export interface McpToolSession {
   callTool(input: {
     name: string;

@@ -26,12 +26,7 @@ function withProviderTimeout(
   };
 }
 
-/**
- * Convenience factory for any OpenAI-compatible chat endpoint. The
- * transport enforces the exactly-one policy's provider layer:
- * `parallel_tool_calls` is forced off whenever tools are offered, so the
- * model cannot emit parallel calls in a single response.
- */
+/** Forces `parallel_tool_calls` off whenever tools are offered. */
 export function openAiCompatible(
   config: OpenAiCompatibleModelConfig,
   fetchImpl: typeof fetch = fetch,
