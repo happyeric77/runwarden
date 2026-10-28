@@ -84,7 +84,7 @@ describe('NativeMcpClient', () => {
         { inputSchema: { value: z.string() } },
         async () => ({
           isError: true,
-          _meta: { 'durable-agent-runtime/error-category': 'correctable' },
+          _meta: { 'runwarden/error-category': 'correctable' },
           content: [{ type: 'text', text: 'Try a corrected value.' }],
         }),
       );

@@ -1,6 +1,6 @@
-# durable-agent-runtime (working title)
+# Runwarden
 
-> Final name TBD. This repository is private while the runtime is extracted from its original production codebase; it will open once the extraction is complete and the example runs end to end.
+> This repository is private while the runtime is extracted from its original production codebase; it will open once the extraction is complete and the example runs end to end.
 
 A lightweight, governed agent runtime for TypeScript. It runs on your own Postgres — no server to deploy, no hosted control plane.
 
@@ -17,7 +17,7 @@ Durability is the substrate, not the headline: invocations are claimed by worker
 ## Shape (v1)
 
 1. Core npm package: `defineRuntime({ db, provider, mcpServers, policies })`, `runtime.invoke()`
-2. `npx <name> init` — creates the invocation + audit schema in your Postgres
+2. `npx runwarden init` — creates the invocation + audit schema in your Postgres
 3. `runWorker()` plus a docker-compose template
 4. A 30-minute runnable example
 
@@ -28,7 +28,7 @@ Postgres and executed by any worker running `runWorker()` — under lease,
 with heartbeat, retry, and crash recovery.
 
 ```sh
-DATABASE_URL=postgres://... npx durable-agent-runtime init   # create tables (idempotent)
+DATABASE_URL=postgres://... npx runwarden init   # create tables (idempotent)
 ```
 
 ```ts

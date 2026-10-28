@@ -6,14 +6,14 @@ import * as schema from './schema';
 export type Database = NodePgDatabase<typeof schema>;
 
 export interface DatabaseHandle {
-  readonly kind: 'durable-agent-runtime/database';
+  readonly kind: 'runwarden/database';
   readonly db: Database;
   readonly pool: Pool;
   close(): Promise<void>;
 }
 
 class DbHandle implements DatabaseHandle {
-  readonly kind = 'durable-agent-runtime/database' as const;
+  readonly kind = 'runwarden/database' as const;
 
   constructor(
     readonly db: Database,
