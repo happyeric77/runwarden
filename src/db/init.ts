@@ -35,9 +35,7 @@ export async function initDb(
     .sort();
   const client = await handle.pool.connect();
   try {
-    await client.query(
-      `select pg_advisory_lock(hashtext('durable-agent-runtime:init'))`,
-    );
+    await client.query(`select pg_advisory_lock(hashtext('runwarden:init'))`);
     try {
       await client.query('create schema if not exists agent_runtime');
       await client.query(LEDGER_DDL);
@@ -75,7 +73,7 @@ export async function initDb(
       };
     } finally {
       await client.query(
-        `select pg_advisory_unlock(hashtext('durable-agent-runtime:init'))`,
+        `select pg_advisory_unlock(hashtext('runwarden:init'))`,
       );
     }
   } finally {

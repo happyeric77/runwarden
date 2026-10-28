@@ -36,9 +36,7 @@ import {
 export type { DatabaseHandle } from './db/client';
 
 // Keep worker subscriptions off the public package surface.
-export const RUNTIME_INTERNALS: unique symbol = Symbol(
-  'durable-agent-runtime/internals',
-);
+export const RUNTIME_INTERNALS: unique symbol = Symbol('runwarden/internals');
 
 export interface RuntimeInternals {
   onPolicyDecision(listener: (decision: PolicyDecision) => void): () => void;

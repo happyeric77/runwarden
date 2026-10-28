@@ -5,7 +5,7 @@ import { initDb } from './db/init';
 const [command] = process.argv.slice(2);
 
 if (command !== 'init') {
-  console.error('Usage: durable-agent-runtime init');
+  console.error('Usage: runwarden init');
   process.exit(1);
 }
 
