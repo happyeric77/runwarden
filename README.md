@@ -21,6 +21,27 @@ Durability is the substrate, not the headline: invocations are claimed by worker
 3. `runWorker()` plus a docker-compose template
 4. A 30-minute runnable example
 
+## Durable mode
+
+Pass a database and `invoke()` becomes durable: the invocation is queued in
+Postgres and executed by any worker running `runWorker()` — under lease,
+with heartbeat, retry, and crash recovery.
+
+```sh
+DATABASE_URL=postgres://... npx durable-agent-runtime init   # create tables (idempotent)
+```
+
+```ts
+const db = createDb(process.env.DATABASE_URL);
+const runtime = defineRuntime({ db, provider, policies });
+runWorker({ runtime, db }); // in your worker process
+await runtime.invoke({ scope: 'tenant-a', prompt: '...' }); // enqueue + wait
+```
+
+A runnable version with a docker-compose template (app + worker + postgres)
+is in [`examples/durable`](examples/durable/README.md) — three steps from an
+empty database to a completed invocation.
+
 ## What it is not
 
 - Not an enterprise orchestration platform: no multi-region, no massive-throughput claims, no multi-day workflow orchestration.
