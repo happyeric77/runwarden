@@ -32,7 +32,7 @@ import { PolicyEngine, type ParsedToolCall } from './policy-engine';
  * execution-path denial). Appended to the system prompt only while
  * `exactlyOneToolCallPerStep` is enabled.
  */
-export const TOOL_EXECUTION_CONTRACT = [
+const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
   '- Propose exactly one tool call in each assistant response when tools are needed.',
   '- Wait for that tool result before deciding on the next tool call.',
@@ -40,7 +40,7 @@ export const TOOL_EXECUTION_CONTRACT = [
   '- Never use empty strings as placeholders for omitted optional arguments.',
 ].join('\n');
 
-export interface AiSdkNativeRuntimeOptions {
+interface AiSdkNativeRuntimeOptions {
   model: LanguageModel;
   /** Registered tools. Executed through `mcpClient` (ADR-007). */
   tools?: ToolDefinition[];
@@ -56,7 +56,7 @@ export interface AiSdkNativeRuntimeOptions {
 interface InvocationState {
   currentProposalCount: number;
   toolCallCount: number;
-  session?: McpToolSession;
+  session?: Promise<McpToolSession>;
 }
 
 interface StepTimings {
@@ -159,7 +159,10 @@ function dropBlankOptionalStringArguments(
 }
 
 function modelMessages(
-  history: readonly { role: 'user' | 'assistant' | 'system'; content: string }[],
+  history: readonly {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+  }[],
   input: RuntimeInvocationInput,
 ): ModelMessage[] {
   return [
@@ -201,9 +204,18 @@ export class AiSdkNativeRuntime implements AgentRuntime {
 
   async invoke(input: RuntimeInvocationInput): Promise<InvocationResult> {
     const startedAt = this.now();
-    const state: InvocationState = { currentProposalCount: 0, toolCallCount: 0 };
+    const state: InvocationState = {
+      currentProposalCount: 0,
+      toolCallCount: 0,
+    };
     const policy = new PolicyEngine(this.options.policies ?? {}, {
-      onDecision: this.options.onPolicyDecision,
+      onDecision: (decision) =>
+        this.options.onPolicyDecision?.({
+          ...decision,
+          scope: input.scope,
+          invocationId: input.invocationId,
+          runId: input.runId,
+        }),
       correctionForInvalidCall: (call) => this.correctionFor(call),
     });
 
@@ -251,7 +263,6 @@ export class AiSdkNativeRuntime implements AgentRuntime {
           policy.approvalFor({
             toolName: toolCall.toolName,
             proposalCount: state.currentProposalCount,
-            executedToolCalls: state.toolCallCount,
             scope: input.scope,
           }),
         onStepEnd: (step) => {
@@ -287,7 +298,13 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         totalMs: completedAt - startedAt,
       });
 
-      return { invocationId: input.invocationId, runId: input.runId, text, provider, model };
+      return {
+        invocationId: input.invocationId,
+        runId: input.runId,
+        text,
+        provider,
+        model,
+      };
     } catch (error) {
       const runtimeError = findAgentRuntimeError(error);
       if (runtimeError) throw runtimeError;
@@ -296,7 +313,9 @@ export class AiSdkNativeRuntime implements AgentRuntime {
       }
       throw new AgentRuntimeError('failure', 'Native runtime failed');
     } finally {
-      await state.session?.close().catch(() => undefined);
+      await state.session
+        ?.then((session) => session.close())
+        .catch(() => undefined);
     }
   }
 
@@ -316,12 +335,13 @@ export class AiSdkNativeRuntime implements AgentRuntime {
             inputSchema: definition.inputSchema,
             execute: async (arguments_) => {
               try {
-                state.session ??= await this.options.mcpClient!.open({
+                state.session ??= this.options.mcpClient!.open({
                   runId: input.runId,
                   timeoutMs: this.remaining(startedAt),
                 });
+                const session = await state.session;
                 state.toolCallCount += 1;
-                return await state.session.callTool({
+                return await session.callTool({
                   name,
                   arguments: arguments_ as Record<string, unknown>,
                   timeoutMs: this.remaining(startedAt),

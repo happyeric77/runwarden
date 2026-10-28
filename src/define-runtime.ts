@@ -90,9 +90,17 @@ class RoutingMcpClient implements McpToolClient {
     runId: string;
     timeoutMs: number;
   }): Promise<McpToolSession> {
-    const sessions = await Promise.all(
+    const opened = await Promise.allSettled(
       this.clients.map((client) => client.open(input)),
     );
+    const sessions = opened.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const failure = opened.find((result) => result.status === 'rejected');
+    if (failure) {
+      await Promise.allSettled(sessions.map((session) => session.close()));
+      throw failure.reason;
+    }
     const route = (toolName: string): McpToolSession => {
       const index = this.servers.findIndex((server) =>
         server.tools?.includes(toolName),

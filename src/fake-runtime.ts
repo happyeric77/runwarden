@@ -17,9 +17,7 @@ export class FakeAgentRuntime implements AgentRuntime {
   private readonly invocations: RuntimeInvocationInput[] = [];
 
   constructor(
-    private readonly result?:
-      | InvocationResult
-      | FakeAgentRuntimeResultFactory,
+    private readonly result?: InvocationResult | FakeAgentRuntimeResultFactory,
   ) {}
 
   getInvocationHistory(): readonly RuntimeInvocationInput[] {

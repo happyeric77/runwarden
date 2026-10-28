@@ -62,6 +62,3 @@ export function openAiCompatible(
 
   return provider.chatModel(model);
 }
-
-/** Alias kept from the pre-extraction runtime for continuity. */
-export const createAiSdkOpenAiCompatibleModel = openAiCompatible;

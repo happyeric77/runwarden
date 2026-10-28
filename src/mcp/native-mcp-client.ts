@@ -77,7 +77,10 @@ export class NativeMcpClient implements McpToolClient {
     runId: string;
     timeoutMs: number;
   }): Promise<McpToolSession> {
-    const client = new Client({ name: `${RUNTIME_NAME}-runtime`, version: '1' });
+    const client = new Client({
+      name: `${RUNTIME_NAME}-runtime`,
+      version: '1',
+    });
     const transport = new StreamableHTTPClientTransport(this.endpoint, {
       requestInit: {
         headers: { ...this.headers, [RUN_ID_HEADER]: input.runId },
