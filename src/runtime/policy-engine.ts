@@ -24,11 +24,7 @@ type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
 interface PolicyEngineHooks {
   /** Called synchronously for every recorded policy ruling. */
   onDecision?: (decision: PolicyRuling) => void;
-  /**
-   * Given a schema-invalid proposed call, return a correction instruction
-   * if the mistake is correctable (the tool's `validateInput` hook),
-   * or `undefined` to fail the invocation.
-   */
+  /** Correction instruction for a correctable schema-invalid call, or `undefined` to fail. */
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
 }
 
@@ -36,18 +32,7 @@ type ToolApprovalVerdict =
   | 'not-applicable'
   | { type: 'denied'; reason: string };
 
-/**
- * The tool-call policy state machine (ADR-004). The runtime asks it to
- * approve every proposed call before execution, and reports every finished
- * step back to it. It owns:
- *
- * - the exactly-one rule (multi-call steps are denied wholesale),
- * - the allowlist and require-approval lists,
- * - the tool-call budget,
- * - the correction budget: a violating step earns a bounded number of
- *   correction turns per incident; a failed correction past the budget
- *   terminates the invocation with a specific error.
- */
+/** Approves every proposed call before execution; owns the call, correction, and approval budgets. */
 export class PolicyEngine {
   private readonly exactlyOne: boolean;
   private readonly correctionBudget: number;
@@ -82,11 +67,7 @@ export class PolicyEngine {
     return this.terminal;
   }
 
-  /**
-   * Mark the invocation terminally failed from outside the proposal path —
-   * e.g. a hard tool-execution (MCP) error, after which the model must not
-   * be given another turn. The first failure wins.
-   */
+  /** Terminal failure from outside the proposal path; the first failure wins. */
   fail(error: AgentRuntimeError): void {
     this.terminal ??= error;
   }

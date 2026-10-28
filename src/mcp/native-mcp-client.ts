@@ -43,12 +43,7 @@ function isCorrectable(meta: Record<string, unknown> | undefined): boolean {
   );
 }
 
-/**
- * MCP client over Streamable HTTP. One session per invocation attempt,
- * correlated to its run by the run-id header; tool results are size-capped
- * and application errors marked `correctable` are returned to the model as
- * ordinary results so it can adjust within the same execution.
- */
+/** One session per attempt; `correctable` application errors return to the model as ordinary results. */
 export class NativeMcpClient implements McpToolClient {
   private readonly endpoint: URL;
   private readonly headers: Record<string, string>;

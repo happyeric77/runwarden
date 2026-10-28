@@ -25,27 +25,19 @@ import {
   type OpenAiCompatibleModelConfig,
 } from './runtime/model';
 
-/**
- * Opaque handle for the runtime's database, as returned by `createDb()`.
- * The durable queue, schema, and worker that consume it land with the
- * database phase; in this phase `db` is accepted and carried, while
- * execution runs in-process through `Runtime.invoke`.
- */
+/** Opaque DB handle; accepted now, consumed by the durable queue and worker in the database phase. */
 export interface DatabaseHandle {
   readonly kind: 'durable-agent-runtime/database';
 }
 
 export interface DefineRuntimeOptions {
   db?: DatabaseHandle;
-  /** An AI SDK language model. Takes precedence over `provider`. */
+  /** Takes precedence over `provider`. */
   model?: LanguageModel;
-  /** Convenience: build the model from an OpenAI-compatible endpoint config. */
   provider?: OpenAiCompatibleModelConfig;
-  /** Registered tools (definitions + validation); executed through MCP. */
   tools?: ToolDefinition[];
-  /** MCP servers to execute tool calls against (ADR-007). */
   mcpServers?: McpServerConfig[];
-  /** Escape hatch: bring your own MCP client instead of `mcpServers`. */
+  /** Bring your own MCP client instead of `mcpServers`. */
   mcpClient?: McpToolClient;
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
@@ -55,9 +47,7 @@ export interface DefineRuntimeOptions {
 }
 
 export interface Runtime {
-  /** Execute one invocation now, in-process, and return its result. */
   invoke(input: InvocationInput): Promise<InvocationResult>;
-  /** The stable execution engine (ADR-008); the worker consumes this. */
   readonly engine: AgentRuntime;
 }
 
@@ -116,19 +106,6 @@ class RoutingMcpClient implements McpToolClient {
   }
 }
 
-/**
- * Assemble a runtime: the single entry point host applications use.
- *
- * ```ts
- * const runtime = defineRuntime({
- *   provider: { baseUrl, apiKey, model },
- *   mcpServers: [{ name: 'notes', url: 'http://localhost:43120/mcp' }],
- *   tools: [notesSearchTool, notesGetTool],
- *   policies: { requireApproval: ['billing__refund'] },
- * });
- * const result = await runtime.invoke({ scope: 'tenant-a', prompt: '...' });
- * ```
- */
 export function defineRuntime(options: DefineRuntimeOptions): Runtime {
   const model =
     options.model ??

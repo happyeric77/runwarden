@@ -26,12 +26,7 @@ import type {
 } from '../contracts/runtime';
 import { PolicyEngine, type ParsedToolCall } from './policy-engine';
 
-/**
- * The prompt layer of the exactly-one policy — the weakest of its three
- * layers (prompt contract, provider `parallel_tool_calls: false`, and
- * execution-path denial). Appended to the system prompt only while
- * `exactlyOneToolCallPerStep` is enabled.
- */
+/** Prompt layer of the exactly-one policy (weakest of three); appended only while the policy is enabled. */
 const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
   '- Propose exactly one tool call in each assistant response when tools are needed.',
@@ -42,7 +37,6 @@ const TOOL_EXECUTION_CONTRACT = [
 
 interface AiSdkNativeRuntimeOptions {
   model: LanguageModel;
-  /** Registered tools. Executed through `mcpClient` (ADR-007). */
   tools?: ToolDefinition[];
   mcpClient?: McpToolClient;
   loadSystemPrompt?: SystemPromptLoader;
@@ -174,13 +168,6 @@ function modelMessages(
   ];
 }
 
-/**
- * The execution engine: one invocation's tool loop on the Vercel AI SDK
- * (ADR-008), with the tool-call policy enforced on the execution path by
- * `PolicyEngine` (ADR-004). Tools are definitions; every execution is a
- * call through the configured MCP client, inside one session per
- * invocation attempt.
- */
 export class AiSdkNativeRuntime implements AgentRuntime {
   private readonly now: () => number;
   private readonly maxDurationMs: number;
@@ -362,11 +349,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
     ) as ToolSet;
   }
 
-  /**
-   * Ask the tool's `validateInput` hook whether a schema-invalid proposal
-   * is correctable. Blank optional strings are normalized away first, so
-   * validators see the same input the repaired call would carry.
-   */
+  /** Blank optional strings are normalized away before `validateInput` sees the input. */
   private correctionFor(call: ParsedToolCall): string | undefined {
     const definition = this.toolsByName.get(call.toolName);
     if (!definition?.validateInput) return undefined;
