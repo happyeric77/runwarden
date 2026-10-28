@@ -1,113 +1,144 @@
 # Runwarden
 
-> This repository is private while Runwarden is prepared for its public release.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
+![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1)
 
-A governed agent runtime for TypeScript: tool-call policy is enforced by the
-runtime — not requested in the prompt — every ruling is audited, and
-invocations are durable on your own Postgres. Lightweight: no server to
-deploy, no hosted control plane.
+**Agents act. Policies decide. Postgres remembers.**
 
-Agent frameworks decide how an agent thinks. Runwarden decides what an agent
-is **allowed to do**, proves it stayed inside those lines, and makes sure the
-run finishes even if the process dies.
+A lightweight, governed agent runtime for TypeScript: enforced tool-call
+policy and a per-call audit trail, durable on your own Postgres.
 
-## Quickstart
+## Overview
 
-No API key needed — the model is scripted, and it misbehaves on purpose:
+Agent runs rarely fail by crashing. They fail by staying alive and doing
+the wrong thing: picking the wrong tool, calling it twice, or reaching for
+something sensitive nobody approved — while prompt-level rules ("never do
+X") get quietly ignored by the model.
 
-```sh
-pnpm install --frozen-lockfile
-docker compose -f examples/quickstart/docker-compose.yml up -d --wait
-pnpm quickstart
-```
+Runwarden puts the rules in the runtime instead of the prompt. You define
+the runtime once — model, MCP tool servers, policies — and every tool call
+the model proposes is checked against policy before it executes. Every
+ruling is written to Postgres as an audit row. Underneath, invocations are
+durable: queued in your database, claimed by workers under leases, retried
+with backoff.
 
-You will watch an exactly-one violation get denied and corrected, an
-approval-gated refund get stopped cold, and the audit trail print out of
-Postgres at the end. Walkthrough:
-[examples/quickstart](examples/quickstart/README.md).
-
-## What it enforces
-
-- **Tool-call policy, enforced on the execution path.** Per-step call limits
-  (exactly one by default), tool allowlists, and a bounded correction budget.
-  Rules the model cannot talk its way around.
-- **Governance.** Per-scope capability grants: which tools a given scope may
-  call at all, and which calls are gated on human approval. Gated calls fail
-  closed today — they do not run, and the denial is recorded; the resumable
-  approval flow is a later slice.
-- **Audit.** Every invocation and every policy ruling lands in your Postgres
-  (`agent_runtime.invocations`, `agent_runtime.policy_decisions`) with a
-  run-id you can trace end to end. Per-tool-call audit rows are the next
-  slice; their table already ships with the schema.
-
-Durability is the substrate, not the headline: invocations are claimed by
-workers under lease with heartbeat and retry, so a crashed process's work is
-reclaimed instead of lost. Execution is at-least-once — tool side effects
-should use stable idempotency keys.
-
-## Shape (v1)
-
-One npm package:
-
-- `defineRuntime({ db, provider, mcpServers, policies })` assembles the
-  runtime. `runtime.invoke()` executes in-process, or enqueues durably when
-  a `db` is passed (plus `enqueue()` / `getInvocation()`).
-- `runwarden init` creates the schema — four tables in a dedicated
-  `agent_runtime` Postgres schema — with an idempotent migration ledger.
-- `runWorker()` claims and executes the queue. Tools execute only through
-  MCP servers you configure.
-- Examples: the [quickstart](examples/quickstart/README.md) (scripted model,
-  the full story in one command) and
-  [durable mode](examples/durable/README.md) (separate app/worker processes,
-  a real model provider).
-
-## Durable mode
-
-Pass a database and `invoke()` becomes durable: the invocation is queued in
-Postgres and executed by any worker running `runWorker()` — under lease,
-with heartbeat, retry, and crash recovery.
-
-```sh
-DATABASE_URL=postgres://user:password@localhost:5432/mydb npx runwarden init
-```
-
-```ts
-const db = createDb(process.env.DATABASE_URL);
-const runtime = defineRuntime({ db, provider, policies });
-runWorker({ runtime, db }); // in your worker process
-await runtime.invoke({ scope: 'my-app', prompt: '...' }); // enqueue + wait
-```
-
-## How it differs from DBOS
+It is built for indie developers and solo founders putting agents in front
+of real users — for the day your agent first does something wrong in front
+of one of them.
 
 DBOS gives you durable execution for workflows and functions. Runwarden's
 headline is governing what an agent may do — enforced tool-call policy and
 per-call audit — with durable execution as the substrate underneath.
 
-## What it is not
+## Features
 
-- Not for massive throughput: a shared Postgres queue with serial
-  per-process execution is sized for indie workloads, not fleets.
-- Not multi-region: one Postgres, one region.
-- Not multi-language: TypeScript only in v1.
-- Not a workflow platform: no multi-day orchestration, and durability is
-  per invocation — no step-level checkpointing in v1.
-- Not a framework: it sits under AI SDK / your agent loop; it does not
-  replace how the agent thinks.
-- Not hosted: your database, your workers, your audit trail.
-- Not enterprise-grade: no SSO, no compliance certifications — policy,
-  governance, and audit for people putting agents in front of real users,
-  kept deliberately small.
+- **Enforced tool-call policy** — exactly one tool call per model step, a
+  tool allowlist, and per-tool input validation, all checked in the runtime
+  between the model's proposal and execution. A violating call executes
+  nothing.
+- **Correction loop** — a denied call returns a correction the model can
+  act on, within a bounded correction budget, instead of failing silently
+  or looping forever.
+- **Approvals, fail-closed** — list a tool in `requireApproval` and a
+  proposal to call it is stopped and recorded as `approval_requested`.
+  Nothing sensitive executes unapproved.
+- **Audit trail in Postgres** — every invocation and every policy decision
+  is a row in the `agent_runtime` schema, queryable with plain SQL.
+- **Durable execution** — invocations are claimed by workers under leases
+  with heartbeats, retried with backoff, and fenced so a stale worker
+  cannot overwrite a newer attempt. Delivery is at-least-once; idempotency
+  keys guard side effects.
+- **MCP-first tools** — tools execute through MCP servers you run;
+  Runwarden governs, the server executes.
+- **Your database** — `runwarden init` creates the schema in your own
+  Postgres. No hosted service, no separate state store.
 
-## Status
+## Quick Start
 
-Engine and durable layer are in and tested: 46 unit tests, and 18
-integration tests against a real Postgres. Approval is fail-closed in v1 —
-a gated call is denied, recorded, and the invocation fails; resumable
-approvals, per-tool-call audit writing, and the packaged build (the bin is
-currently a tsx script) land in later slices. The engine already runs in
-production inside its reference application.
+### Requirements
+
+- Node.js 22 or newer
+- pnpm 10
+- Docker, to run Postgres for the example (or your own Postgres — set
+  `DATABASE_URL` and skip the compose step)
+- No model API key: the quickstart's model is scripted and deterministic
+
+```sh
+git clone https://github.com/happyeric77/runwarden.git
+cd runwarden
+pnpm install
+docker compose -f examples/quickstart/docker-compose.yml up -d --wait
+pnpm quickstart
+```
+
+The quickstart runs the full story against a local MCP server: a two-call
+step denied by the exactly-one rule, a corrected call that executes, and a
+refund stopped by `requireApproval` — then it prints the audit rows from
+Postgres. The [quickstart README](examples/quickstart/README.md) walks
+through each step and what you should see.
+
+For the production-shaped setup — separate app and worker processes and a
+real model provider — see [examples/durable](examples/durable/README.md).
+
+## How It Works
+
+1. You describe the runtime once with `defineRuntime`: the model, the MCP
+   servers and tools it may use, and the policies that apply.
+2. `invoke()` writes a durable invocation row to Postgres and waits for
+   the outcome; `enqueue()` returns immediately instead.
+3. A worker started with `runWorker()` claims queued invocations under a
+   lease, heartbeating while it runs; expired leases are reclaimed.
+4. At every model step, the proposed tool calls are checked against
+   policy — exactly-one, allowlist, input validation, `requireApproval` —
+   before anything executes through MCP.
+5. Every ruling lands in `policy_decisions` and the invocation's state in
+   `invocations`, so the whole run can be reconstructed from SQL.
+
+The end of a quickstart run prints exactly that:
+
+```text
+[audit] what landed in Postgres:
+  invocation <id>: status=succeeded attempts=1
+  invocation <id>: status=failed attempts=1 error=approval_required
+  policy_decision invocation=<id> rule=exactly_one decision=deny tool=notes__search
+  policy_decision invocation=<id> rule=require_approval decision=approval_requested tool=billing__refund
+```
+
+## Limitations
+
+- **Not for massive throughput:** Runwarden targets indie and solo scale —
+  agents in front of your users, not a high-volume job platform.
+- **Single region:** one Postgres is the state store. There is no
+  multi-region story.
+- **TypeScript only in v1:** the runtime, the policy surface, and the
+  examples are TypeScript on Node.js.
+- **Invocation-level durability only:** a crashed or expired invocation
+  retries the whole run, at-least-once. There is no step-level
+  checkpointing and no multi-day workflow orchestration.
+- **Approvals are fail-closed, not resumable:** `requireApproval` stops
+  the invocation with `approval_required` and records the request. An
+  approve-and-rerun flow is a later slice; today, approving means
+  re-running the invocation yourself.
+- **Audit scope today:** invocations and policy decisions are recorded.
+  The `tool_call_audits` table ships ahead of its writer, which lands in a
+  later slice.
+- **Not hosted, not enterprise-grade:** a library you run yourself.
+  Isolation between your own workloads is a single `scope` string, not a
+  multi-tenant control plane.
+
+## Development
+
+```sh
+pnpm install
+pnpm test              # unit tests
+pnpm test:integration  # real Postgres via embedded-postgres
+pnpm typecheck
+pnpm format:check
+pnpm demo              # in-process governed invocation, no database
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Runwarden is licensed under the [MIT License](LICENSE).
