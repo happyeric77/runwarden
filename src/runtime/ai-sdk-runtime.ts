@@ -26,7 +26,6 @@ import type {
 } from '../contracts/runtime';
 import { PolicyEngine, type ParsedToolCall } from './policy-engine';
 
-/** Prompt layer of the exactly-one policy (weakest of three); appended only while the policy is enabled. */
 const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
   '- Propose exactly one tool call in each assistant response when tools are needed.',
@@ -111,7 +110,6 @@ function isTimeoutFailure(error: unknown): boolean {
   return false;
 }
 
-/** Unwrap ZodEffects / ZodOptional layers down to a ZodObject shape, if any. */
 function zodObjectShape(
   schema: z.ZodType,
 ): Record<string, z.ZodType> | undefined {
@@ -334,8 +332,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
                   timeoutMs: this.remaining(startedAt),
                 });
               } catch (error) {
-                // A hard MCP failure is terminal: the model must not be
-                // given another turn to improvise around it.
+                // Hard MCP failures must not give the model another turn.
                 policy.fail(
                   findAgentRuntimeError(error) ??
                     new AgentRuntimeError('failure', 'MCP tool call failed'),
@@ -349,7 +346,6 @@ export class AiSdkNativeRuntime implements AgentRuntime {
     ) as ToolSet;
   }
 
-  /** Blank optional strings are normalized away before `validateInput` sees the input. */
   private correctionFor(call: ParsedToolCall): string | undefined {
     const definition = this.toolsByName.get(call.toolName);
     if (!definition?.validateInput) return undefined;

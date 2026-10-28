@@ -9,7 +9,6 @@ export type FakeAgentRuntimeResultFactory = (
   invocationIndex: number,
 ) => InvocationResult;
 
-/** Deterministic in-memory `AgentRuntime` for tests and examples. */
 export class FakeAgentRuntime implements AgentRuntime {
   private readonly invocations: RuntimeInvocationInput[] = [];
 

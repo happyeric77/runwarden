@@ -26,7 +26,6 @@ function withProviderTimeout(
   };
 }
 
-/** Forces `parallel_tool_calls` off whenever tools are offered. */
 export function openAiCompatible(
   config: OpenAiCompatibleModelConfig,
   fetchImpl: typeof fetch = fetch,

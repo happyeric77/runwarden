@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { LanguageModel } from 'ai';
 
+import { AgentRuntimeError } from './contracts/errors';
 import type {
   McpServerConfig,
   PolicyDecision,
@@ -12,12 +13,19 @@ import type {
   AgentRuntime,
   HistoryLoader,
   InvocationInput,
+  InvocationRecord,
   InvocationResult,
   McpToolClient,
   McpToolSession,
   RuntimeMetrics,
   SystemPromptLoader,
 } from './contracts/runtime';
+import type { DatabaseHandle } from './db/client';
+import {
+  enqueueInvocation,
+  getInvocationRowById,
+  toRecord,
+} from './db/repositories/invocations';
 import { NativeMcpClient } from './mcp/native-mcp-client';
 import { AiSdkNativeRuntime } from './runtime/ai-sdk-runtime';
 import {
@@ -25,19 +33,23 @@ import {
   type OpenAiCompatibleModelConfig,
 } from './runtime/model';
 
-/** Opaque DB handle; accepted now, consumed by the durable queue and worker in the database phase. */
-export interface DatabaseHandle {
-  readonly kind: 'durable-agent-runtime/database';
+export type { DatabaseHandle } from './db/client';
+
+// Keep worker subscriptions off the public package surface.
+export const RUNTIME_INTERNALS: unique symbol = Symbol(
+  'durable-agent-runtime/internals',
+);
+
+export interface RuntimeInternals {
+  onPolicyDecision(listener: (decision: PolicyDecision) => void): () => void;
 }
 
 export interface DefineRuntimeOptions {
   db?: DatabaseHandle;
-  /** Takes precedence over `provider`. */
   model?: LanguageModel;
   provider?: OpenAiCompatibleModelConfig;
   tools?: ToolDefinition[];
   mcpServers?: McpServerConfig[];
-  /** Bring your own MCP client instead of `mcpServers`. */
   mcpClient?: McpToolClient;
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
@@ -46,9 +58,20 @@ export interface DefineRuntimeOptions {
   onPolicyDecision?: (decision: PolicyDecision) => void;
 }
 
+export interface InvokeOptions {
+  waitTimeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
 export interface Runtime {
-  invoke(input: InvocationInput): Promise<InvocationResult>;
+  invoke(
+    input: InvocationInput,
+    opts?: InvokeOptions,
+  ): Promise<InvocationResult>;
+  enqueue(input: InvocationInput): Promise<{ invocationId: string }>;
+  getInvocation(id: string): Promise<InvocationRecord | undefined>;
   readonly engine: AgentRuntime;
+  readonly [RUNTIME_INTERNALS]?: RuntimeInternals;
 }
 
 function buildMcpClient(
@@ -65,8 +88,6 @@ function buildMcpClient(
       }),
   );
   if (clients.length === 1) return clients[0];
-  // Multiple servers: sessions open against every server; per-tool
-  // routing by the servers' `tools` hints is applied by callTool below.
   return new RoutingMcpClient(clients, servers);
 }
 
@@ -106,6 +127,16 @@ class RoutingMcpClient implements McpToolClient {
   }
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function dbRequired(operation: string): AgentRuntimeError {
+  return new AgentRuntimeError(
+    'failure',
+    `${operation} requires a database: pass createDb() as defineRuntime({ db })`,
+    { code: 'db_required' },
+  );
+}
+
 export function defineRuntime(options: DefineRuntimeOptions): Runtime {
   const model =
     options.model ??
@@ -117,6 +148,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
   const mcpClient =
     options.mcpClient ?? buildMcpClient(options.mcpServers, options.policies);
 
+  const decisionListeners = new Set<(decision: PolicyDecision) => void>();
   const engine = new AiSdkNativeRuntime({
     model,
     tools: options.tools,
@@ -125,16 +157,80 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     loadHistory: options.loadHistory,
     policies: options.policies,
     onMetrics: options.onMetrics,
-    onPolicyDecision: options.onPolicyDecision,
+    onPolicyDecision: (decision) => {
+      for (const listener of decisionListeners) listener(decision);
+      options.onPolicyDecision?.(decision);
+    },
   });
+
+  const db = options.db;
+
+  async function durableInvoke(
+    input: InvocationInput,
+    opts?: InvokeOptions,
+  ): Promise<InvocationResult> {
+    const { invocationId } = await enqueueInvocation(db!.db, input);
+    const deadline = Date.now() + (opts?.waitTimeoutMs ?? 300_000);
+    const pollIntervalMs = opts?.pollIntervalMs ?? 250;
+    for (;;) {
+      const row = await getInvocationRowById(db!.db, invocationId);
+      if (row?.status === 'succeeded') {
+        return {
+          invocationId,
+          runId: row.activeRunId!,
+          text: row.resultText ?? '',
+          provider: row.provider ?? undefined,
+          model: row.model ?? undefined,
+        };
+      }
+      if (row?.status === 'failed' || row?.status === 'cancelled') {
+        throw new AgentRuntimeError(
+          'failure',
+          row.lastErrorMessage ?? `Invocation ${row.status}`,
+          {
+            code: row.lastErrorCode ?? `invocation_${row.status}`,
+            invocationId,
+          },
+        );
+      }
+      if (Date.now() >= deadline) {
+        // A caller's wait deadline must not cancel durable work.
+        throw new AgentRuntimeError(
+          'timeout',
+          `Timed out waiting for invocation ${invocationId}`,
+          { invocationId },
+        );
+      }
+      await sleep(pollIntervalMs);
+    }
+  }
 
   return {
     engine,
-    invoke: (input) =>
-      engine.invoke({
-        ...input,
-        invocationId: randomUUID(),
-        runId: randomUUID(),
-      }),
+    invoke: db
+      ? durableInvoke
+      : (input) =>
+          engine.invoke({
+            ...input,
+            invocationId: randomUUID(),
+            runId: randomUUID(),
+          }),
+    enqueue: async (input) => {
+      if (!db) throw dbRequired('enqueue');
+      return enqueueInvocation(db.db, input);
+    },
+    getInvocation: async (id) => {
+      if (!db) throw dbRequired('getInvocation');
+      const row = await getInvocationRowById(db.db, id);
+      return row ? toRecord(row) : undefined;
+    },
+    [RUNTIME_INTERNALS]: {
+      onPolicyDecision: (listener) => {
+        decisionListeners.add(listener);
+        return () => {
+          decisionListeners.delete(listener);
+        };
+      },
+    },
   };
 }
