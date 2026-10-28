@@ -7,8 +7,7 @@ import type {
 import type { Database } from '../client';
 import type { InvocationRow } from '../schema';
 
-// Raw query results bypass drizzle's column mapping: int8 arrives as string
-// and keys are snake_case, so rows are normalized here once.
+// Raw queries bypass Drizzle's bigint and column-name mapping.
 function mapRow(raw: Record<string, unknown>): InvocationRow {
   return {
     id: Number(raw.id),
@@ -108,15 +107,24 @@ export interface ClaimOptions {
   maxBatchSize: number;
 }
 
-// Expired-lease 'running' rows are candidates again in the same query, so
-// crash recovery needs no separate sweep.
+// Recovery and exhausted-lease cleanup share the atomic claim statement.
 export async function claimInvocations(
   db: Database,
   workerId: string,
   options: ClaimOptions,
 ): Promise<InvocationRow[]> {
   const result = await db.execute(sql`
-    with candidate as (
+    with exhausted as (
+      update agent_runtime.invocations
+      set status = 'failed',
+          failed_at = now(), completed_at = now(), updated_at = now(),
+          last_error_code = 'lease_expired',
+          last_error_message = 'Lease expired on the final attempt',
+          ${CLEAR_CLAIM}
+      where status = 'running' and lease_expires_at < now()
+        and attempt_count >= max_attempts
+      returning id
+    ), candidate as (
       select inv.id
       from agent_runtime.invocations inv
       where inv.attempt_count < inv.max_attempts
@@ -133,6 +141,7 @@ export async function claimInvocations(
               and pred.ordering_key = inv.ordering_key
               and pred.id <> inv.id
               and pred.status in ('pending', 'running', 'awaiting_approval')
+              and pred.id not in (select id from exhausted)
               and (
                 pred.status = 'running'
                 or pred.created_at < inv.created_at
@@ -166,6 +175,7 @@ export async function heartbeatInvocation(
   db: Database,
   id: number,
   workerId: string,
+  runId: string,
   leaseTimeoutMs: number,
 ): Promise<boolean> {
   const result = await db.execute(sql`
@@ -174,6 +184,7 @@ export async function heartbeatInvocation(
         lease_expires_at = now() + (${leaseTimeoutMs} * interval '1 millisecond'),
         updated_at = now()
     where id = ${id} and claimed_by = ${workerId} and status = 'running'
+      and active_run_id = ${runId}
     returning id
   `);
   return result.rows.length > 0;
@@ -190,6 +201,7 @@ export async function markInvocationSucceeded(
   db: Database,
   id: number,
   workerId: string,
+  runId: string,
   result: { resultText: string; provider?: string; model?: string },
 ): Promise<boolean> {
   const updated = await db.execute(sql`
@@ -203,23 +215,24 @@ export async function markInvocationSucceeded(
         ${CLEAR_CLAIM},
         updated_at = now()
     where id = ${id} and claimed_by = ${workerId} and status = 'running'
+      and active_run_id = ${runId}
     returning id
   `);
   return updated.rows.length > 0;
 }
 
-// Attempts are counted at claim time, so attempt_count >= max_attempts here
-// means this failure is terminal; otherwise the row goes back to pending.
+// Claim already counted this attempt; failure must not increment it again.
 export async function markInvocationFailed(
   db: Database,
   id: number,
   workerId: string,
+  runId: string,
   error: { code: string; message: string },
   retryDelayMs: number,
 ): Promise<InvocationRow | undefined> {
   const updated = await db.execute(sql`
     update agent_runtime.invocations
-    set status = case when attempt_count >= max_attempts then 'failed' else 'pending' end,
+    set status = (case when attempt_count >= max_attempts then 'failed' else 'pending' end)::agent_runtime.invocation_status,
         next_attempt_at = now() + (${retryDelayMs} * interval '1 millisecond'),
         failed_at = case when attempt_count >= max_attempts then now() else failed_at end,
         completed_at = case when attempt_count >= max_attempts then now() else completed_at end,
@@ -228,6 +241,7 @@ export async function markInvocationFailed(
         ${CLEAR_CLAIM},
         updated_at = now()
     where id = ${id} and claimed_by = ${workerId} and status = 'running'
+      and active_run_id = ${runId}
     returning *
   `);
   const raw = updated.rows[0] as Record<string, unknown> | undefined;

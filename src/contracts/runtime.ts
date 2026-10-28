@@ -1,14 +1,11 @@
 import type { AgentRuntimeError } from './errors';
 
-/** `scope` is the only isolation key; the library never learns what it means. */
 export interface InvocationInput {
   scope: string;
   prompt: string;
   conversationId?: string;
-  /** Invocations sharing an ordering key run serially, in enqueue order. */
   orderingKey?: string;
   context?: Record<string, unknown>;
-  /** Deduplication key, unique per scope. */
   idempotencyKey?: string;
   maxAttempts?: number;
   metadata?: Record<string, unknown>;
@@ -16,7 +13,6 @@ export interface InvocationInput {
 
 export interface InvocationResult {
   invocationId: string;
-  /** One run id per attempt; a retried invocation gets a fresh run id. */
   runId: string;
   text: string;
   provider?: string;

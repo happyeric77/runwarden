@@ -1,52 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, symlinkSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import EmbeddedPostgres from 'embedded-postgres';
-
-// The bundled native lib dir ships versioned files (libpq.so.5.18) without
-// the soname links (libpq.so.5) the loader looks for; recreate them in a
-// scratch dir and put both on LD_LIBRARY_PATH before spawning any binary.
-let libraryPathReady = false;
-function prepareLibraryPath(): void {
-  if (libraryPathReady) return;
-  libraryPathReady = true;
-  const require = createRequire(import.meta.url);
-  const embeddedEntry = require.resolve('embedded-postgres');
-  const platformEntry = createRequire(embeddedEntry).resolve(
-    '@embedded-postgres/linux-x64',
-  );
-  let dir = path.dirname(platformEntry);
-  while (!existsSync(path.join(dir, 'native', 'lib'))) {
-    const parent = path.dirname(dir);
-    if (parent === dir)
-      throw new Error('embedded-postgres native lib not found');
-    dir = parent;
-  }
-  const nativeLib = path.join(dir, 'native', 'lib');
-  const scratch = path.join(tmpdir(), 'dar-pg-libs');
-  mkdirSync(scratch, { recursive: true });
-  for (const file of readdirSync(nativeLib)) {
-    const match = /^(lib.+)\.so\.(\d+)\.\d+$/.exec(file);
-    if (!match) continue;
-    try {
-      symlinkSync(
-        path.join(nativeLib, file),
-        path.join(scratch, `${match[1]}.so.${match[2]}`),
-      );
-    } catch {
-      // Link already exists from an earlier run.
-    }
-  }
-  process.env.LD_LIBRARY_PATH = [
-    scratch,
-    nativeLib,
-    process.env.LD_LIBRARY_PATH ?? '',
-  ]
-    .filter(Boolean)
-    .join(':');
-}
 
 export interface TestPostgres {
   connectionString: string;
@@ -55,10 +10,8 @@ export interface TestPostgres {
 
 let counter = 0;
 
-// Real Postgres binaries via embedded-postgres; pg-mem cannot reproduce
-// SKIP LOCKED, partial indexes, or timestamptz semantics these tests need.
+// Mocks cannot reproduce PostgreSQL locking and partial indexes.
 export async function startTestPostgres(): Promise<TestPostgres> {
-  prepareLibraryPath();
   counter += 1;
   const port = 25_000 + Math.floor(Math.random() * 4_000) + counter;
   const databaseName = `dar_test_${counter}`;
@@ -67,7 +20,8 @@ export async function startTestPostgres(): Promise<TestPostgres> {
     user: 'postgres',
     password: 'password',
     port,
-    persistent: false,
+    persistent: true,
+    postgresFlags: process.platform === 'win32' ? [] : ['-k', tmpdir()],
   });
   await pg.initialise();
   await pg.start();

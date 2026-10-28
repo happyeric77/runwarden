@@ -21,20 +21,16 @@ import type { InvocationRow } from '../db/schema';
 import { RUNTIME_INTERNALS, type RuntimeInternals } from '../define-runtime';
 
 export interface RunWorkerOptions {
-  runtime: { engine: AgentRuntime };
+  runtime: {
+    engine: AgentRuntime;
+    readonly [RUNTIME_INTERNALS]?: RuntimeInternals;
+  };
   db: DatabaseHandle;
   workerId?: string;
-  /** Default `120_000`. */
   leaseTimeoutMs?: number;
-  /** Default `30_000`. */
   heartbeatIntervalMs?: number;
-  /** Default `60_000`. */
   retryDelayMs?: number;
-  /** Default `25`. */
-  maxBatchSize?: number;
-  /** Default `500`. */
   pollIdleMs?: number;
-  /** Default `250`. */
   pollActiveMs?: number;
   onSucceeded?: (
     invocation: InvocationRecord,
@@ -73,28 +69,40 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
   const leaseTimeoutMs = options.leaseTimeoutMs ?? 120_000;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
   const retryDelayMs = options.retryDelayMs ?? 60_000;
-  const maxBatchSize = options.maxBatchSize ?? 25;
   const pollIdleMs = options.pollIdleMs ?? 500;
   const pollActiveMs = options.pollActiveMs ?? 250;
   const db = options.db.db;
-  const internals = (
-    options.runtime as { [RUNTIME_INTERNALS]?: RuntimeInternals }
-  )[RUNTIME_INTERNALS];
+  const internals = options.runtime[RUNTIME_INTERNALS];
 
   let stopped = false;
 
   async function executeOne(row: InvocationRow): Promise<void> {
     const record = toRecord(row);
+    const auditWrites: Promise<void>[] = [];
+    let auditError: unknown;
     const unsubscribe = internals?.onPolicyDecision(
       (decision: PolicyDecision) => {
-        if (decision.invocationId !== String(row.id)) return;
-        // Decision persistence must not fail the invocation it describes.
-        void insertPolicyDecision(db, decision).catch(() => undefined);
+        if (
+          decision.invocationId !== String(row.id) ||
+          decision.runId !== row.activeRunId
+        )
+          return;
+        auditWrites.push(
+          insertPolicyDecision(db, decision).catch((error) => {
+            auditError = error;
+          }),
+        );
       },
     );
     let leaseLost = false;
     const heartbeat = setInterval(() => {
-      void heartbeatInvocation(db, row.id, workerId, leaseTimeoutMs)
+      void heartbeatInvocation(
+        db,
+        row.id,
+        workerId,
+        row.activeRunId!,
+        leaseTimeoutMs,
+      )
         .then((ok) => {
           if (!ok) leaseLost = true;
         })
@@ -102,17 +110,36 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     }, heartbeatIntervalMs);
     heartbeat.unref?.();
     try {
-      const result = await options.runtime.engine.invoke({
-        ...row.input,
-        invocationId: String(row.id),
-        runId: row.activeRunId!,
-      });
+      let result: InvocationResult;
+      try {
+        result = await options.runtime.engine.invoke({
+          ...row.input,
+          invocationId: String(row.id),
+          runId: row.activeRunId!,
+        });
+      } finally {
+        unsubscribe?.();
+        await Promise.all(auditWrites);
+        if (auditError)
+          throw new AgentRuntimeError(
+            'failure',
+            'Policy audit persistence failed',
+            { code: 'audit_persistence_failed' },
+            { cause: auditError },
+          );
+      }
       if (leaseLost) return;
-      const marked = await markInvocationSucceeded(db, row.id, workerId, {
-        resultText: result.text,
-        provider: result.provider,
-        model: result.model,
-      });
+      const marked = await markInvocationSucceeded(
+        db,
+        row.id,
+        workerId,
+        row.activeRunId!,
+        {
+          resultText: result.text,
+          provider: result.provider,
+          model: result.model,
+        },
+      );
       if (marked) {
         await options.onSucceeded?.(
           { ...record, status: 'succeeded', resultText: result.text },
@@ -126,6 +153,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         db,
         row.id,
         workerId,
+        row.activeRunId!,
         { code: errorCode(agentError), message: agentError.message },
         retryDelayMs,
       );
@@ -134,7 +162,6 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       }
     } finally {
       clearInterval(heartbeat);
-      unsubscribe?.();
     }
   }
 
@@ -144,7 +171,8 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       try {
         claimed = await claimInvocations(db, workerId, {
           leaseTimeoutMs,
-          maxBatchSize,
+          // Execution is serial, so only claim work we can heartbeat now.
+          maxBatchSize: 1,
         });
       } catch {
         await sleep(pollIdleMs);

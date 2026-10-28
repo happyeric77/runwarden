@@ -1,7 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// Integration tests run against a real Postgres (embedded-postgres binaries);
-// they are excluded from the default unit run (see vitest.config.ts).
+// Keep real-Postgres tests separate so unit runs need no database.
 export default defineConfig({
   test: {
     globals: true,

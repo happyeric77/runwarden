@@ -7,6 +7,7 @@ import {
   enqueueInvocation,
   getInvocationRowById,
   heartbeatInvocation,
+  markInvocationFailed,
   markInvocationSucceeded,
 } from './repositories/invocations';
 import {
@@ -91,6 +92,7 @@ describe('invocation repositories', () => {
       handle.db,
       Number(a1.invocationId),
       'worker-1',
+      claimed.find((row) => String(row.id) === a1.invocationId)!.activeRunId!,
       { resultText: 'done' },
     );
     const next = await claimInvocations(handle.db, 'worker-1', {
@@ -133,19 +135,150 @@ describe('invocation repositories', () => {
       scope: 'scope-heartbeat',
       prompt: 'beat',
     });
-    await claimInvocations(handle.db, 'worker-owner', {
+    const claimed = await claimInvocations(handle.db, 'worker-owner', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 25,
     });
     const id = Number(invocationId);
+    const runId = claimed.find((row) => row.id === id)!.activeRunId!;
     await expect(
-      heartbeatInvocation(handle.db, id, 'worker-intruder', 30_000),
+      heartbeatInvocation(handle.db, id, 'worker-intruder', runId, 30_000),
     ).resolves.toBe(false);
     await expect(
-      heartbeatInvocation(handle.db, id, 'worker-owner', 30_000),
+      heartbeatInvocation(handle.db, id, 'worker-owner', runId, 30_000),
     ).resolves.toBe(true);
     const row = await getInvocationRowById(handle.db, invocationId);
     expect(row?.status).toBe('running');
+  });
+
+  it('retries failures and marks the final failure terminal', async () => {
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-failure',
+      prompt: 'fail',
+      maxAttempts: 2,
+    });
+    const [first] = await claimInvocations(handle.db, 'failure-worker', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    expect(String(first!.id)).toBe(invocationId);
+    const retry = await markInvocationFailed(
+      handle.db,
+      first!.id,
+      'failure-worker',
+      first!.activeRunId!,
+      { code: 'test', message: 'retry' },
+      0,
+    );
+    expect(retry?.status).toBe('pending');
+    const [last] = await claimInvocations(handle.db, 'failure-worker', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    const failed = await markInvocationFailed(
+      handle.db,
+      last!.id,
+      'failure-worker',
+      last!.activeRunId!,
+      { code: 'test', message: 'terminal' },
+      0,
+    );
+    expect(failed?.status).toBe('failed');
+    expect(failed?.attemptCount).toBe(2);
+    expect(failed?.claimedBy).toBeNull();
+    expect(failed?.completedAt).not.toBeNull();
+  });
+
+  it('terminalizes an exhausted expired claim and unblocks its successor', async () => {
+    const first = await enqueueInvocation(handle.db, {
+      scope: 'scope-exhausted',
+      prompt: 'last claim',
+      orderingKey: 'key',
+      maxAttempts: 1,
+    });
+    const next = await enqueueInvocation(handle.db, {
+      scope: 'scope-exhausted',
+      prompt: 'next',
+      orderingKey: 'key',
+    });
+    await claimInvocations(handle.db, 'crashed', {
+      leaseTimeoutMs: 40,
+      maxBatchSize: 1,
+    });
+    await sleep(100);
+    const claimed = await claimInvocations(handle.db, 'recovery', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    expect(
+      (await getInvocationRowById(handle.db, first.invocationId))?.status,
+    ).toBe('failed');
+    expect(
+      (await getInvocationRowById(handle.db, first.invocationId))?.attemptCount,
+    ).toBe(1);
+    expect(claimed.map((row) => String(row.id))).toEqual([next.invocationId]);
+    await markInvocationSucceeded(
+      handle.db,
+      claimed[0]!.id,
+      'recovery',
+      claimed[0]!.activeRunId!,
+      { resultText: 'done' },
+    );
+  });
+
+  it('fences stale attempts even when the worker id is reused', async () => {
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-fencing',
+      prompt: 'fenced',
+    });
+    const [old] = await claimInvocations(handle.db, 'reused', {
+      leaseTimeoutMs: 40,
+      maxBatchSize: 1,
+    });
+    await sleep(100);
+    const [fresh] = await claimInvocations(handle.db, 'reused', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    expect(String(fresh!.id)).toBe(invocationId);
+    expect(fresh!.activeRunId).not.toBe(old!.activeRunId);
+    expect(
+      await heartbeatInvocation(
+        handle.db,
+        old!.id,
+        'reused',
+        old!.activeRunId!,
+        30_000,
+      ),
+    ).toBe(false);
+    expect(
+      await markInvocationSucceeded(
+        handle.db,
+        old!.id,
+        'reused',
+        old!.activeRunId!,
+        { resultText: 'stale' },
+      ),
+    ).toBe(false);
+    expect(
+      await markInvocationFailed(
+        handle.db,
+        old!.id,
+        'reused',
+        old!.activeRunId!,
+        { code: 'stale', message: 'stale' },
+        0,
+      ),
+    ).toBeUndefined();
+    expect(
+      await markInvocationSucceeded(
+        handle.db,
+        fresh!.id,
+        'reused',
+        fresh!.activeRunId!,
+        { resultText: 'fresh' },
+      ),
+    ).toBe(true);
   });
 
   it('runs the worker lease singleton primitive', async () => {

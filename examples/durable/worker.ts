@@ -1,7 +1,3 @@
-/**
- * Durable-mode worker: claims invocations from Postgres and executes them.
- * Run the app (app.ts) in another terminal to enqueue work for it.
- */
 import { createDb, defineRuntime, runWorker } from '../../src/index';
 
 const connectionString = process.env.DATABASE_URL;
@@ -31,9 +27,11 @@ const worker = runWorker({
 });
 
 console.log('[worker] waiting for invocations (Ctrl+C to stop)');
-process.on('SIGINT', () => {
+const stop = () => {
   void worker.stop().then(async () => {
     await db.close();
     process.exit(0);
   });
-});
+};
+process.once('SIGINT', stop);
+process.once('SIGTERM', stop);
