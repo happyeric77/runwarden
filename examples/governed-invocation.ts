@@ -1,16 +1,3 @@
-/**
- * Phase 1 demo: one governed invocation, end to end, with no external
- * services. Run with `pnpm demo`.
- *
- * A scripted mock model first proposes TWO tool calls in one step —
- * a violation of the default exactly-one policy — and the runtime denies
- * both before anything executes. The model then corrects itself with a
- * single call, which executes through a fake MCP client, and the
- * invocation completes with a final text answer.
- *
- * The policy decisions printed at the end are the same records a host
- * application would persist for audit via `onPolicyDecision`.
- */
 import { MockLanguageModelV4 } from 'ai/test';
 import { z } from 'zod';
 
@@ -114,8 +101,6 @@ const runtime = defineRuntime({
   tools: [lookupNoteTool],
   loadSystemPrompt: async () => 'You are a helpful notes assistant.',
   loadHistory: async () => [],
-  // Default policies: exactlyOneToolCallPerStep: true, correctionBudget: 1,
-  // maxToolCallsPerInvocation: 8, maxDurationMs: 120_000.
   onPolicyDecision: (decision) => decisions.push(decision),
 });
 

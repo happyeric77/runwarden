@@ -2,8 +2,17 @@ export { defineRuntime } from './define-runtime';
 export type {
   DatabaseHandle,
   DefineRuntimeOptions,
+  InvokeOptions,
   Runtime,
 } from './define-runtime';
+
+export { createDb } from './db/client';
+export { initDb, type InitOptions, type InitResult } from './db/init';
+export {
+  runWorker,
+  type RunWorkerOptions,
+  type WorkerHandle,
+} from './worker/run-worker';
 
 export {
   AgentRuntimeError,

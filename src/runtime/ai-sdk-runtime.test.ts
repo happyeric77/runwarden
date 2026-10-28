@@ -18,15 +18,6 @@ import type {
 import { AiSdkNativeRuntime } from './ai-sdk-runtime';
 import { openAiCompatible } from './model';
 
-/**
- * Ported regression suite. The scenarios are the pre-extraction runtime's
- * permanent regression tests, with the domain fixtures replaced by neutral
- * equivalents: a directory get/search pair standing in for the record
- * tools, and a scheduled-task list tool whose full-object schema carries
- * the same cross-field refinement (and correction wording) as the
- * canonical domain schema it replaces.
- */
-
 const invocation: RuntimeInvocationInput = {
   scope: 'scope-a',
   prompt: 'Current user message',
@@ -851,8 +842,7 @@ describe('AiSdkNativeRuntime', () => {
       totalToolMs: expect.any(Number),
       totalMs: expect.any(Number),
     });
-    // The runtime and the SDK read the same clock in production, so the work
-    // they each measured cannot exceed the wall-clock time they both span.
+    // Shared-clock measurements cannot exceed their enclosing wall time.
     expect(metrics.totalProviderMs).toBeGreaterThanOrEqual(0);
     expect(metrics.totalToolMs).toBeGreaterThanOrEqual(0);
     expect(metrics.totalMs).toBeGreaterThanOrEqual(

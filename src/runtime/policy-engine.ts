@@ -1,7 +1,6 @@
 import { AgentRuntimeError } from '../contracts/errors';
 import type { PolicyDecision, RuntimePolicies } from '../contracts/policy';
 
-/** The instruction fed back to the model after a multi-call step is denied. */
 const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';
 
@@ -14,7 +13,6 @@ export interface ParsedToolCall {
 interface PendingCorrection {
   kind: 'multi-call' | 'input-validation';
   instruction: string;
-  /** For `input-validation`, the tool the correction must call again. */
   toolName?: string;
   correctionsUsed: number;
 }
@@ -22,9 +20,7 @@ interface PendingCorrection {
 type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
 
 interface PolicyEngineHooks {
-  /** Called synchronously for every recorded policy ruling. */
   onDecision?: (decision: PolicyRuling) => void;
-  /** Correction instruction for a correctable schema-invalid call, or `undefined` to fail. */
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
 }
 
@@ -32,7 +28,6 @@ type ToolApprovalVerdict =
   | 'not-applicable'
   | { type: 'denied'; reason: string };
 
-/** Approves every proposed call before execution; owns the call, correction, and approval budgets. */
 export class PolicyEngine {
   private readonly exactlyOne: boolean;
   private readonly correctionBudget: number;
@@ -67,12 +62,10 @@ export class PolicyEngine {
     return this.terminal;
   }
 
-  /** Terminal failure from outside the proposal path; the first failure wins. */
   fail(error: AgentRuntimeError): void {
     this.terminal ??= error;
   }
 
-  /** The pending correction instruction to inject into the next step, if any. */
   correctionInstruction(): string | undefined {
     return this.pendingCorrection?.instruction;
   }
@@ -133,8 +126,7 @@ export class PolicyEngine {
         decision: 'approval_requested',
         toolName: input.toolName,
       });
-      // Phase 1 interception point: the durable awaiting_approval state
-      // machine (ADR-011) replaces this failure with a resumable pause.
+      // Fail closed until the approval state machine can resume work.
       this.terminal ??= new AgentRuntimeError(
         'failure',
         `Tool ${input.toolName} requires approval before execution`,

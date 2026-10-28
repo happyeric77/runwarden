@@ -1,14 +1,22 @@
 {
+  "bin": {
+    "durable-agent-runtime": "./src/cli.ts"
+  },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.60",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ai": "7.0.123",
+    "drizzle-orm": "^0.45.4",
+    "pg": "^8.23.1",
     "zod": "^3.24.1"
   },
   "description": "A lightweight, self-hosted TypeScript agent runtime: durable invocations on your own Postgres, with enforced tool-call policy, governance, and audit.",
   "devDependencies": {
     "@ianvs/prettier-plugin-sort-imports": "4.7.0",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.15.5",
+    "drizzle-kit": "^0.31.11",
+    "embedded-postgres": "^18.4.0-beta.17",
     "prettier": "3.6.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
@@ -27,6 +35,18 @@
   "main": "./src/index.ts",
   "name": "durable-agent-runtime",
   "packageManager": "pnpm@10.34.9",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@embedded-postgres/darwin-arm64",
+      "@embedded-postgres/darwin-x64",
+      "@embedded-postgres/linux-arm",
+      "@embedded-postgres/linux-arm64",
+      "@embedded-postgres/linux-ia32",
+      "@embedded-postgres/linux-ppc64",
+      "@embedded-postgres/linux-x64",
+      "@embedded-postgres/windows-x64"
+    ]
+  },
   "prettier": {
     "printWidth": 80,
     "semi": true,
@@ -49,6 +69,7 @@
     "format": "prettier --write '**/*.{ts,json,md}'",
     "format:check": "prettier --check '**/*.{ts,json,md}'",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "type": "module",
