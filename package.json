@@ -1,6 +1,6 @@
 {
   "bin": {
-    "durable-agent-runtime": "./src/cli.ts"
+    "runwarden": "./src/cli.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.60",
@@ -33,7 +33,7 @@
   },
   "license": "MIT",
   "main": "./src/index.ts",
-  "name": "durable-agent-runtime",
+  "name": "runwarden",
   "packageManager": "pnpm@10.34.9",
   "pnpm": {
     "onlyBuiltDependencies": [
