@@ -1,0 +1,91 @@
+import type { AgentRuntimeError } from './errors';
+
+/** `scope` is the only isolation key; the library never learns what it means. */
+export interface InvocationInput {
+  scope: string;
+  prompt: string;
+  conversationId?: string;
+  /** Invocations sharing an ordering key run serially, in enqueue order. */
+  orderingKey?: string;
+  context?: Record<string, unknown>;
+  /** Deduplication key, unique per scope. */
+  idempotencyKey?: string;
+  maxAttempts?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface InvocationResult {
+  invocationId: string;
+  /** One run id per attempt; a retried invocation gets a fresh run id. */
+  runId: string;
+  text: string;
+  provider?: string;
+  model?: string;
+}
+
+export type InvocationStatus =
+  | 'pending'
+  | 'running'
+  | 'awaiting_approval'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface InvocationRecord extends InvocationInput {
+  id: string;
+  status: InvocationStatus;
+  attemptCount: number;
+  resultText?: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  createdAt: Date;
+  completedAt?: Date;
+}
+
+export interface NeutralMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+export type RuntimeInvocationInput = InvocationInput & {
+  invocationId: string;
+  runId: string;
+};
+
+export interface AgentRuntime {
+  invoke(input: RuntimeInvocationInput): Promise<InvocationResult>;
+}
+
+export type SystemPromptLoader = (
+  input: RuntimeInvocationInput,
+) => Promise<string>;
+
+export type HistoryLoader = (
+  input: RuntimeInvocationInput,
+) => Promise<readonly NeutralMessage[]>;
+
+export interface McpToolSession {
+  callTool(input: {
+    name: string;
+    arguments: Record<string, unknown>;
+    timeoutMs: number;
+  }): Promise<string>;
+  close(): Promise<void>;
+}
+
+export interface McpToolClient {
+  open(input: { runId: string; timeoutMs: number }): Promise<McpToolSession>;
+}
+
+export interface RuntimeMetrics {
+  runId: string;
+  contextLoadMs: number;
+  historyLoadMs: number;
+  providerCallCount: number;
+  toolCallCount: number;
+  totalProviderMs: number;
+  totalToolMs: number;
+  totalMs: number;
+}
+
+export type { AgentRuntimeError };
