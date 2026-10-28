@@ -1,8 +1,13 @@
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { z } from 'zod';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { RUN_ID_HEADER } from '../brand';
 import { NativeMcpClient } from './native-mcp-client';
@@ -110,7 +115,10 @@ describe('NativeMcpClient', () => {
       );
     });
     const client = new NativeMcpClient({ endpoint });
-    const session = await client.open({ runId: 'run-legacy', timeoutMs: 5_000 });
+    const session = await client.open({
+      runId: 'run-legacy',
+      timeoutMs: 5_000,
+    });
 
     await expect(
       session.callTool({

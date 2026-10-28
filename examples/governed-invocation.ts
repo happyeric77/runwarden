@@ -35,7 +35,10 @@ const fakeMcpClient: McpToolClient = {
           `[mcp] executed ${name} with ${JSON.stringify(args)} (fake server)`,
         );
         return JSON.stringify([
-          { type: 'text', text: `Note found: "Roadmap" — ship the runtime first.` },
+          {
+            type: 'text',
+            text: `Note found: "Roadmap" — ship the runtime first.`,
+          },
         ]);
       },
       async close() {},
@@ -62,7 +65,12 @@ const model = new MockLanguageModelV4({
     });
 
     if (promptText.includes('Note found')) {
-      return finish([{ type: 'text', text: 'The roadmap note says: ship the runtime first.' }]);
+      return finish([
+        {
+          type: 'text',
+          text: 'The roadmap note says: ship the runtime first.',
+        },
+      ]);
     }
     if (promptText.includes('execution-denied')) {
       console.log(

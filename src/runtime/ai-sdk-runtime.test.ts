@@ -4,7 +4,11 @@ import { z } from 'zod';
 
 import { RUN_ID_HEADER } from '../brand';
 import { AgentRuntimeError } from '../contracts/errors';
-import type { ToolDefinition } from '../contracts/policy';
+import type {
+  PolicyDecision,
+  RuntimePolicies,
+  ToolDefinition,
+} from '../contracts/policy';
 import type {
   McpToolClient,
   NeutralMessage,
@@ -12,7 +16,7 @@ import type {
   RuntimeMetrics,
 } from '../contracts/runtime';
 import { AiSdkNativeRuntime } from './ai-sdk-runtime';
-import { createAiSdkOpenAiCompatibleModel } from './model';
+import { openAiCompatible } from './model';
 
 /**
  * Ported regression suite. The scenarios are the pre-extraction runtime's
@@ -180,6 +184,8 @@ function runtime(
     maxInvocationMs?: number;
     now?: () => number;
     onMetrics?: (metrics: RuntimeMetrics) => void;
+    policies?: RuntimePolicies;
+    onPolicyDecision?: (decision: PolicyDecision) => void;
   } = {},
 ) {
   const model = new MockLanguageModelV4({
@@ -190,7 +196,9 @@ function runtime(
   const callTool = vi.fn().mockResolvedValue('[{"type":"text","text":"ok"}]');
   const close = vi.fn().mockResolvedValue(undefined);
   const open = vi.fn().mockResolvedValue({ callTool, close });
-  const loadSystemPrompt = vi.fn().mockResolvedValue('You are a careful assistant.');
+  const loadSystemPrompt = vi
+    .fn()
+    .mockResolvedValue('You are a careful assistant.');
   const loadHistory = vi.fn().mockResolvedValue(historyMessages);
   const instance = new AiSdkNativeRuntime({
     loadSystemPrompt,
@@ -200,7 +208,9 @@ function runtime(
     mcpClient: { open } as McpToolClient,
     now: options.now,
     onMetrics: options.onMetrics,
+    onPolicyDecision: options.onPolicyDecision,
     policies: {
+      ...options.policies,
       ...(options.maxToolCallsPerInvocation !== undefined
         ? { maxToolCallsPerInvocation: options.maxToolCallsPerInvocation }
         : {}),
@@ -210,10 +220,316 @@ function runtime(
     },
   });
 
-  return { instance, model, callTool, close, open, loadSystemPrompt, loadHistory };
+  return {
+    instance,
+    model,
+    callTool,
+    close,
+    open,
+    loadSystemPrompt,
+    loadHistory,
+  };
 }
 
 describe('AiSdkNativeRuntime', () => {
+  it('reserves the total budget before parallel calls can execute', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('first', directoryTools.get, { recordId: 1 }),
+          toolCall('excess', directoryTools.get, { recordId: 2 }),
+        ),
+        textStep('must not be requested'),
+      ],
+      {
+        policies: {
+          exactlyOneToolCallPerStep: false,
+          maxToolCallsPerInvocation: 1,
+        },
+        onPolicyDecision,
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      message: 'Tool-call budget exceeded',
+    });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(subject.callTool).toHaveBeenCalledWith(
+      expect.objectContaining({ arguments: { recordId: 1 } }),
+    );
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.close).toHaveBeenCalledOnce();
+    expect(onPolicyDecision).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'max_tool_calls', decision: 'deny' }),
+    );
+  });
+
+  it('shares one pending MCP session across parallel calls and reports executed metrics', async () => {
+    const onMetrics = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('first', directoryTools.get, { recordId: 1 }),
+          toolCall('second', directoryTools.get, { recordId: 2 }),
+        ),
+        textStep('Done'),
+      ],
+      {
+        policies: {
+          exactlyOneToolCallPerStep: false,
+          maxToolCallsPerInvocation: 2,
+        },
+        onMetrics,
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(subject.open).toHaveBeenCalledOnce();
+    expect(subject.close).toHaveBeenCalledOnce();
+    expect(subject.callTool).toHaveBeenCalledTimes(2);
+    expect(onMetrics).toHaveBeenCalledWith(
+      expect.objectContaining({ toolCallCount: 2 }),
+    );
+  });
+
+  it.each(['multi-call', 'invalid-input'])(
+    'issues no %s correction with a zero budget',
+    async (kind) => {
+      const onPolicyDecision = vi.fn();
+      const subject = runtime(
+        [
+          kind === 'multi-call'
+            ? toolStep(
+                toolCall('one', directoryTools.get, { recordId: 1 }),
+                toolCall('two', directoryTools.get, { recordId: 2 }),
+              )
+            : toolStep(
+                toolCall('invalid', scheduledTaskTools.list, {
+                  query_mode: 'upcoming',
+                  time_of_day: 'morning',
+                }),
+              ),
+          toolStep(toolCall('corrected', directoryTools.get, { recordId: 3 })),
+          textStep('must not be requested'),
+        ],
+        { policies: { correctionBudget: 0 }, onPolicyDecision },
+      );
+      await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+        kind: 'failure',
+      });
+      expect(subject.model.doGenerateCalls).toHaveLength(1);
+      expect(subject.open).not.toHaveBeenCalled();
+      expect(
+        onPolicyDecision.mock.calls.map(([decision]) => decision.decision),
+      ).not.toContain('correction_issued');
+      expect(onPolicyDecision).toHaveBeenCalledWith(
+        expect.objectContaining({
+          rule: 'correction_budget',
+          decision: 'deny',
+        }),
+      );
+    },
+  );
+
+  it('keeps concurrent invocation audit identities separate', async () => {
+    const onPolicyDecision = vi.fn();
+    const invalid = toolStep(toolCall('invalid', directoryTools.get, {}));
+    const subject = runtime([invalid, invalid], { onPolicyDecision });
+    const inputs = [
+      invocation,
+      {
+        ...invocation,
+        scope: 'scope-b',
+        invocationId: 'inv-2',
+        runId: 'run-2',
+      },
+    ];
+    const results = await Promise.allSettled(
+      inputs.map((input) => subject.instance.invoke(input)),
+    );
+    expect(results.map((result) => result.status)).toEqual([
+      'rejected',
+      'rejected',
+    ]);
+    expect(onPolicyDecision).toHaveBeenCalledTimes(2);
+    for (const input of inputs) {
+      expect(onPolicyDecision).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: input.scope,
+          invocationId: input.invocationId,
+          runId: input.runId,
+        }),
+      );
+    }
+  });
+
+  it('audits invalid calls even within a denied multi-call step', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('valid', directoryTools.get, { recordId: 1 }),
+          toolCall('invalid', directoryTools.get, {}),
+        ),
+        toolStep(toolCall('corrected', directoryTools.get, { recordId: 2 })),
+        textStep('Done'),
+      ],
+      { onPolicyDecision },
+    );
+    await subject.instance.invoke(invocation);
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(onPolicyDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'input_validation',
+        decision: 'deny',
+        toolName: directoryTools.get,
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'invalid input',
+      [toolStep(toolCall('bad', directoryTools.get, {}))],
+      'input_validation',
+    ],
+    [
+      'repeated invalid input',
+      [
+        toolStep(
+          toolCall('bad-1', scheduledTaskTools.list, {
+            time_of_day: 'morning',
+          }),
+        ),
+        toolStep(
+          toolCall('bad-2', scheduledTaskTools.list, {
+            time_of_day: 'evening',
+          }),
+        ),
+      ],
+      'correction_budget',
+    ],
+    [
+      'wrong correction tool',
+      [
+        toolStep(
+          toolCall('bad', scheduledTaskTools.list, { time_of_day: 'morning' }),
+        ),
+        toolStep(toolCall('wrong', directoryTools.get, { recordId: 1 })),
+      ],
+      'input_validation',
+    ],
+    [
+      'missing correction',
+      [
+        toolStep(
+          toolCall('one', directoryTools.get, { recordId: 1 }),
+          toolCall('two', directoryTools.get, { recordId: 2 }),
+        ),
+        textStep('not corrected'),
+      ],
+      'correction_budget',
+    ],
+    [
+      'repeated multi-call',
+      [
+        toolStep(
+          toolCall('one', directoryTools.get, { recordId: 1 }),
+          toolCall('two', directoryTools.get, { recordId: 2 }),
+        ),
+        toolStep(
+          toolCall('three', directoryTools.get, { recordId: 3 }),
+          toolCall('four', directoryTools.get, { recordId: 4 }),
+        ),
+      ],
+      'correction_budget',
+    ],
+  ] as const)(
+    'audits terminal %s with invocation identity',
+    async (_name, responses, rule) => {
+      const onPolicyDecision = vi.fn();
+      const subject = runtime([...responses], { onPolicyDecision });
+      await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+        kind: 'failure',
+      });
+      expect(subject.open).not.toHaveBeenCalled();
+      expect(onPolicyDecision).toHaveBeenLastCalledWith(
+        expect.objectContaining({ rule, decision: 'deny' }),
+      );
+      for (const [decision] of onPolicyDecision.mock.calls) {
+        expect(decision).toMatchObject({
+          scope: invocation.scope,
+          runId: invocation.runId,
+          invocationId: invocation.invocationId,
+        });
+      }
+    },
+  );
+
+  it('audits each multi-call denial and its correction', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('one', directoryTools.get, { recordId: 1 }),
+          toolCall('two', directoryTools.get, { recordId: 2 }),
+        ),
+        toolStep(toolCall('corrected', directoryTools.get, { recordId: 3 })),
+        textStep('Done'),
+      ],
+      { onPolicyDecision },
+    );
+    await subject.instance.invoke(invocation);
+    expect(
+      onPolicyDecision.mock.calls.map(([decision]) => [
+        decision.rule,
+        decision.decision,
+      ]),
+    ).toEqual([
+      ['exactly_one', 'deny'],
+      ['exactly_one', 'deny'],
+      ['exactly_one', 'correction_issued'],
+    ]);
+  });
+
+  it.each<[RuntimePolicies, string, string]>([
+    [{ toolAllowlist: [] }, 'allowlist', 'deny'],
+    [
+      { requireApproval: [directoryTools.get] },
+      'require_approval',
+      'approval_requested',
+    ],
+  ])(
+    'audits configured interception without executing MCP',
+    async (policies, rule, decision) => {
+      const onPolicyDecision = vi.fn();
+      const subject = runtime(
+        [
+          toolStep(toolCall('blocked', directoryTools.get, { recordId: 1 })),
+          textStep('Denied'),
+        ],
+        {
+          policies,
+          onPolicyDecision,
+        },
+      );
+      if (rule === 'require_approval') {
+        await expect(subject.instance.invoke(invocation)).rejects.toMatchObject(
+          { diagnostics: { code: 'approval_required' } },
+        );
+      } else {
+        await expect(
+          subject.instance.invoke(invocation),
+        ).resolves.toMatchObject({ text: 'Denied' });
+      }
+      expect(subject.open).not.toHaveBeenCalled();
+      expect(onPolicyDecision).toHaveBeenCalledWith(
+        expect.objectContaining({ rule, decision }),
+      );
+    },
+  );
+
   it('reuses the AI SDK loop for one tool, one MCP session, and final text', async () => {
     const subject = runtime([
       toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
@@ -241,7 +557,9 @@ describe('AiSdkNativeRuntime', () => {
       timeoutMs: expect.any(Number),
     });
     expect(subject.close).toHaveBeenCalledOnce();
-    expect(JSON.stringify(subject.model.doGenerateCalls[1]?.prompt)).toContain('ok');
+    expect(JSON.stringify(subject.model.doGenerateCalls[1]?.prompt)).toContain(
+      'ok',
+    );
   });
 
   it('denies a multi-call step before MCP and lets the SDK request one corrected tool', async () => {
@@ -303,6 +621,12 @@ describe('AiSdkNativeRuntime', () => {
     expect(subject.model.doGenerateCalls).toHaveLength(5);
     expect(subject.open).toHaveBeenCalledOnce();
     expect(subject.callTool).toHaveBeenCalledTimes(2);
+    expect(
+      subject.callTool.mock.calls.map(([call]) => [call.name, call.arguments]),
+    ).toEqual([
+      [directoryTools.get, { recordId: 3 }],
+      [scheduledTaskTools.list, { query_mode: 'upcoming' }],
+    ]);
     expect(JSON.stringify(subject.model.doGenerateCalls[3]?.prompt)).toContain(
       'time_of_day may only be used with query_mode today or tomorrow',
     );
@@ -336,6 +660,12 @@ describe('AiSdkNativeRuntime', () => {
     expect(subject.model.doGenerateCalls).toHaveLength(5);
     expect(subject.open).toHaveBeenCalledOnce();
     expect(subject.callTool).toHaveBeenCalledTimes(2);
+    expect(
+      subject.callTool.mock.calls.map(([call]) => [call.name, call.arguments]),
+    ).toEqual([
+      [scheduledTaskTools.list, { query_mode: 'upcoming' }],
+      [directoryTools.get, { recordId: 3 }],
+    ]);
     expect(JSON.stringify(subject.model.doGenerateCalls[3]?.prompt)).toContain(
       'exactly one tool call',
     );
@@ -608,7 +938,7 @@ describe('AiSdkNativeRuntime', () => {
       )
       .mockResolvedValueOnce(providerResponse({ content: 'Done' }, 'stop'));
 
-    const model = createAiSdkOpenAiCompatibleModel(
+    const model = openAiCompatible(
       {
         baseUrl: 'https://provider.example/v1/',
         apiKey: 'provider-secret',
@@ -620,7 +950,9 @@ describe('AiSdkNativeRuntime', () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const open = vi.fn().mockResolvedValue({ callTool, close });
     const subject = new AiSdkNativeRuntime({
-      loadSystemPrompt: vi.fn().mockResolvedValue('You are a careful assistant.'),
+      loadSystemPrompt: vi
+        .fn()
+        .mockResolvedValue('You are a careful assistant.'),
       loadHistory: vi.fn().mockResolvedValue(historyMessages),
       model,
       tools: allTools,
@@ -679,7 +1011,7 @@ describe('AiSdkNativeRuntime', () => {
           });
         }),
     );
-    const model = createAiSdkOpenAiCompatibleModel(
+    const model = openAiCompatible(
       {
         baseUrl: 'https://provider.example/v1/',
         apiKey: 'provider-secret',
@@ -689,7 +1021,9 @@ describe('AiSdkNativeRuntime', () => {
       fetchImpl,
     );
     const subject = new AiSdkNativeRuntime({
-      loadSystemPrompt: vi.fn().mockResolvedValue('You are a careful assistant.'),
+      loadSystemPrompt: vi
+        .fn()
+        .mockResolvedValue('You are a careful assistant.'),
       loadHistory: vi.fn().mockResolvedValue(historyMessages),
       model,
       tools: allTools,
@@ -773,7 +1107,9 @@ describe('AiSdkNativeRuntime', () => {
       textStep('Done'),
     ]);
     subject.callTool
-      .mockResolvedValueOnce('[{"type":"text","text":"scheduled_time_must_be_future"}]')
+      .mockResolvedValueOnce(
+        '[{"type":"text","text":"scheduled_time_must_be_future"}]',
+      )
       .mockResolvedValueOnce('[{"type":"text","text":"ok"}]');
 
     await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({

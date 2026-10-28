@@ -54,6 +54,9 @@ export type PolicyDecisionKind =
 
 /** One policy ruling on the tool-call path, as recorded for audit. */
 export interface PolicyDecision {
+  scope: string;
+  invocationId: string;
+  runId: string;
   rule: PolicyRule;
   decision: PolicyDecisionKind;
   toolName?: string;

@@ -1,11 +1,8 @@
 import { AgentRuntimeError } from '../contracts/errors';
-import type {
-  PolicyDecision,
-  RuntimePolicies,
-} from '../contracts/policy';
+import type { PolicyDecision, RuntimePolicies } from '../contracts/policy';
 
 /** The instruction fed back to the model after a multi-call step is denied. */
-export const TOOL_PROPOSAL_CORRECTION =
+const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';
 
 export interface ParsedToolCall {
@@ -22,9 +19,11 @@ interface PendingCorrection {
   correctionsUsed: number;
 }
 
-export interface PolicyEngineHooks {
+type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
+
+interface PolicyEngineHooks {
   /** Called synchronously for every recorded policy ruling. */
-  onDecision?: (decision: PolicyDecision) => void;
+  onDecision?: (decision: PolicyRuling) => void;
   /**
    * Given a schema-invalid proposed call, return a correction instruction
    * if the mistake is correctable (the tool's `validateInput` hook),
@@ -33,7 +32,7 @@ export interface PolicyEngineHooks {
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
 }
 
-export type ToolApprovalVerdict =
+type ToolApprovalVerdict =
   | 'not-applicable'
   | { type: 'denied'; reason: string };
 
@@ -55,6 +54,7 @@ export class PolicyEngine {
   private readonly maxToolCallsPerInvocation: number;
   private pendingCorrection?: PendingCorrection;
   private terminal?: AgentRuntimeError;
+  private approvedToolCalls = 0;
 
   constructor(
     private readonly policies: RuntimePolicies,
@@ -62,8 +62,7 @@ export class PolicyEngine {
   ) {
     this.exactlyOne = policies.exactlyOneToolCallPerStep ?? true;
     this.correctionBudget = policies.correctionBudget ?? 1;
-    this.maxToolCallsPerInvocation =
-      policies.maxToolCallsPerInvocation ?? 8;
+    this.maxToolCallsPerInvocation = policies.maxToolCallsPerInvocation ?? 8;
     for (const [name, value] of [
       ['correctionBudget', this.correctionBudget],
       ['maxToolCallsPerInvocation', this.maxToolCallsPerInvocation],
@@ -100,10 +99,14 @@ export class PolicyEngine {
   approvalFor(input: {
     toolName: string;
     proposalCount: number;
-    executedToolCalls: number;
     scope: string;
   }): ToolApprovalVerdict {
     if (this.exactlyOne && input.proposalCount > 1) {
+      this.record({
+        rule: 'exactly_one',
+        decision: 'deny',
+        toolName: input.toolName,
+      });
       return { type: 'denied', reason: TOOL_PROPOSAL_CORRECTION };
     }
 
@@ -127,13 +130,19 @@ export class PolicyEngine {
       this.pendingCorrection?.kind === 'input-validation' &&
       input.toolName !== this.pendingCorrection.toolName
     ) {
+      this.record({
+        rule: 'input_validation',
+        decision: 'deny',
+        toolName: input.toolName,
+      });
       this.terminal ??= new AgentRuntimeError(
         'failure',
         `Provider did not return a corrected ${this.pendingCorrection.toolName} tool call`,
       );
       return {
         type: 'denied',
-        reason: 'The correction must call the same tool with corrected arguments.',
+        reason:
+          'The correction must call the same tool with corrected arguments.',
       };
     }
 
@@ -156,7 +165,7 @@ export class PolicyEngine {
       };
     }
 
-    if (input.executedToolCalls >= this.maxToolCallsPerInvocation) {
+    if (this.approvedToolCalls >= this.maxToolCallsPerInvocation) {
       this.record({
         rule: 'max_tool_calls',
         decision: 'deny',
@@ -170,6 +179,8 @@ export class PolicyEngine {
       return { type: 'denied', reason: 'Tool-call budget exhausted.' };
     }
 
+    // Reserve synchronously: the SDK approves parallel calls before executing them.
+    this.approvedToolCalls += 1;
     return 'not-applicable';
   }
 
@@ -188,15 +199,8 @@ export class PolicyEngine {
         this.handleViolation(toolCalls, chain);
         return;
       }
-      this.terminal = new AgentRuntimeError(
-        'failure',
-        toolCalls.length === 0
-          ? 'Provider did not return a corrected tool call'
-          : toolCalls.length > 1
-            ? 'Provider returned multiple tool calls'
-            : 'Provider returned invalid tool input',
-        toolCalls.length > 1 ? { code: 'multiple_tool_calls' } : undefined,
-      );
+      this.recordInvalidCalls(toolCalls);
+      this.exhaustCorrection(toolCalls);
       return;
     }
 
@@ -207,7 +211,12 @@ export class PolicyEngine {
     toolCalls: readonly ParsedToolCall[],
     chainCorrections: number,
   ): void {
+    this.recordInvalidCalls(toolCalls);
     if (this.exactlyOne && toolCalls.length > 1) {
+      if (chainCorrections >= this.correctionBudget) {
+        this.exhaustCorrection(toolCalls);
+        return;
+      }
       this.pendingCorrection = {
         kind: 'multi-call',
         instruction: TOOL_PROPOSAL_CORRECTION,
@@ -222,6 +231,10 @@ export class PolicyEngine {
 
     const correction = this.hooks.correctionForInvalidCall?.(invalid);
     if (correction) {
+      if (chainCorrections >= this.correctionBudget) {
+        this.exhaustCorrection(toolCalls);
+        return;
+      }
       this.pendingCorrection = {
         kind: 'input-validation',
         instruction: correction,
@@ -242,7 +255,36 @@ export class PolicyEngine {
     );
   }
 
-  private record(decision: PolicyDecision): void {
+  private recordInvalidCalls(toolCalls: readonly ParsedToolCall[]): void {
+    for (const call of toolCalls) {
+      if (call.invalid) {
+        this.record({
+          rule: 'input_validation',
+          decision: 'deny',
+          toolName: call.toolName,
+        });
+      }
+    }
+  }
+
+  private exhaustCorrection(toolCalls: readonly ParsedToolCall[]): void {
+    this.record({
+      rule: 'correction_budget',
+      decision: 'deny',
+      detail: { correctionBudget: this.correctionBudget },
+    });
+    this.terminal = new AgentRuntimeError(
+      'failure',
+      toolCalls.length === 0
+        ? 'Provider did not return a corrected tool call'
+        : toolCalls.length > 1
+          ? 'Provider returned multiple tool calls'
+          : 'Provider returned invalid tool input',
+      toolCalls.length > 1 ? { code: 'multiple_tool_calls' } : undefined,
+    );
+  }
+
+  private record(decision: PolicyRuling): void {
     try {
       this.hooks.onDecision?.(decision);
     } catch {
