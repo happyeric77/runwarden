@@ -33,4 +33,4 @@ Extraction in progress. The engine already runs in production inside its referen
 
 ## License
 
-TBD — decided before the public release.
+MIT — see [LICENSE](LICENSE).
