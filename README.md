@@ -63,20 +63,21 @@ per-call audit — with durable execution as the substrate underneath.
 - pnpm 10
 - Docker, to run Postgres for the example (or your own Postgres — set
   `DATABASE_URL` and skip the compose step)
-- No model API key: the quickstart's model is scripted and deterministic
+- A model API key for any OpenAI-compatible endpoint (or a local model
+  server — see the quickstart README)
 
 ```sh
 git clone https://github.com/happyeric77/runwarden.git
 cd runwarden
 pnpm install
+export MODEL_API_KEY=sk-... # any OpenAI-compatible endpoint
 docker compose -f examples/quickstart/docker-compose.yml up -d --wait
 pnpm quickstart
 ```
 
-The quickstart runs the full story against a local MCP server: a two-call
-step denied by the exactly-one rule, a corrected call that executes, and a
-refund stopped by `requireApproval` — then it prints the audit rows from
-Postgres. The [quickstart README](examples/quickstart/README.md) walks
+The quickstart runs the full story against a local MCP server with a
+real model: a note lookup that executes through MCP, and a refund stopped
+by `requireApproval` — then it prints the audit rows from Postgres. The [quickstart README](examples/quickstart/README.md) walks
 through each step and what you should see.
 
 For the production-shaped setup — separate app and worker processes and a
@@ -96,15 +97,12 @@ real model provider — see [examples/durable](examples/durable/README.md).
 5. Every ruling lands in `policy_decisions` and the invocation's state in
    `invocations`, so the whole run can be reconstructed from SQL.
 
-The end of a quickstart run prints exactly that:
+The end of a quickstart run prints that trail — a typical run:
 
 ```text
 [audit] what landed in Postgres:
   invocation <id>: status=succeeded attempts=1
   invocation <id>: status=failed attempts=1 error=approval_required
-  policy_decision invocation=<id> rule=exactly_one decision=deny tool=notes__search
-  policy_decision invocation=<id> rule=exactly_one decision=deny tool=notes__search
-  policy_decision invocation=<id> rule=exactly_one decision=correction_issued
   policy_decision invocation=<id> rule=require_approval decision=approval_requested tool=billing__refund
 ```
 

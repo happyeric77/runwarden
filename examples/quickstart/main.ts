@@ -1,4 +1,3 @@
-import { MockLanguageModelV4 } from 'ai/test';
 import { z } from 'zod';
 
 import {
@@ -36,79 +35,15 @@ const billingRefund: ToolDefinition = {
   }),
 };
 
-// Scripted model: no API key, the same three proposals every run.
-const model = new MockLanguageModelV4({
-  doGenerate: async (options) => {
-    const promptText = JSON.stringify(options.prompt);
-    const finish = (content: unknown[]) => ({
-      content: content as never,
-      finishReason: { unified: 'stop', raw: 'stop' } as const,
-      usage: {
-        inputTokens: {
-          total: 1,
-          noCache: 1,
-          cacheRead: undefined,
-          cacheWrite: undefined,
-        },
-        outputTokens: { total: 1, text: 1, reasoning: undefined },
-      },
-      warnings: [],
-    });
-
-    if (promptText.includes('order 42')) {
-      console.log('[model] proposing billing__refund (an approval-gated tool)');
-      return finish([
-        {
-          type: 'tool-call',
-          toolCallId: 'refund-1',
-          toolName: 'billing__refund',
-          input: JSON.stringify({
-            amountCents: 5000,
-            reason: 'Duplicate charge',
-          }),
-        },
-      ]);
-    }
-    if (promptText.includes('Ship the runtime first')) {
-      return finish([
-        {
-          type: 'text',
-          text: 'The roadmap note says: ship the runtime first, add features later.',
-        },
-      ]);
-    }
-    if (promptText.includes('execution-denied')) {
-      console.log(
-        '[model] denial received; retrying with exactly one tool call',
-      );
-      return finish([
-        {
-          type: 'tool-call',
-          toolCallId: 'search-2',
-          toolName: 'notes__search',
-          input: JSON.stringify({ query: 'roadmap' }),
-        },
-      ]);
-    }
-    console.log(
-      '[model] proposing TWO tool calls in one step (policy violation)',
-    );
-    return finish([
-      {
-        type: 'tool-call',
-        toolCallId: 'search-1a',
-        toolName: 'notes__search',
-        input: JSON.stringify({ query: 'roadmap' }),
-      },
-      {
-        type: 'tool-call',
-        toolCallId: 'search-1b',
-        toolName: 'notes__search',
-        input: JSON.stringify({ query: 'handbook' }),
-      },
-    ]);
-  },
-});
+const modelKey = process.env.MODEL_API_KEY;
+if (!modelKey) {
+  console.error(
+    '[quickstart] Set MODEL_API_KEY first — any OpenAI-compatible endpoint ' +
+      'works; for a local model server, any non-empty value. ' +
+      'See examples/quickstart/README.md.',
+  );
+  process.exit(1);
+}
 
 const connectionString =
   process.env.DATABASE_URL ??
@@ -124,7 +59,11 @@ try {
 
   const runtime = defineRuntime({
     db,
-    model,
+    provider: {
+      baseUrl: process.env.MODEL_BASE_URL ?? 'https://api.openai.com/v1',
+      apiKey: modelKey,
+      model: process.env.MODEL_ID ?? 'gpt-4o-mini',
+    },
     mcpServers: [
       {
         name: 'quickstart',
@@ -159,9 +98,7 @@ try {
   });
 
   try {
-    console.log(
-      '\n[app] story 1: a search whose first step breaks the exactly-one rule',
-    );
+    console.log('\n[app] story 1: look up the roadmap note');
     const search = await runtime.invoke({
       scope: 'demo',
       prompt: 'Find the roadmap note and tell me what it says.',
@@ -216,7 +153,7 @@ try {
       );
     }
     console.log(
-      '\n[done] the violating step executed zero tools, the gated refund never ran, ' +
+      '\n[done] the search executed through MCP, the gated refund never ran, ' +
         'and every ruling is in the audit tables.',
     );
   } finally {
