@@ -1,5 +1,6 @@
 export { defineRuntime } from './define-runtime';
 export type {
+  ApprovalActionOptions,
   DatabaseHandle,
   DefineRuntimeOptions,
   InvokeOptions,
@@ -29,6 +30,7 @@ export type {
   McpToolClient,
   McpToolSession,
   NeutralMessage,
+  PendingToolCall,
   RuntimeInvocationInput,
   RuntimeMetrics,
   SystemPromptLoader,

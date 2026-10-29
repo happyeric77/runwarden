@@ -3,12 +3,13 @@ import { sql } from 'drizzle-orm';
 import type {
   InvocationInput,
   InvocationRecord,
+  PendingToolCall,
 } from '../../contracts/runtime';
 import type { Database } from '../client';
 import type { InvocationRow } from '../schema';
 
 // Raw queries bypass Drizzle's bigint and column-name mapping.
-function mapRow(raw: Record<string, unknown>): InvocationRow {
+export function mapRow(raw: Record<string, unknown>): InvocationRow {
   return {
     id: Number(raw.id),
     scope: raw.scope as string,
@@ -42,6 +43,13 @@ function mapRow(raw: Record<string, unknown>): InvocationRow {
   };
 }
 
+export function toPendingToolCall(raw: unknown): PendingToolCall | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const toolName = (raw as { toolName?: unknown }).toolName;
+  if (typeof toolName !== 'string') return undefined;
+  return { toolName, input: (raw as { input?: unknown }).input };
+}
+
 export function toRecord(row: InvocationRow): InvocationRecord {
   return {
     ...row.input,
@@ -49,6 +57,7 @@ export function toRecord(row: InvocationRow): InvocationRecord {
     status: row.status,
     attemptCount: row.attemptCount,
     resultText: row.resultText ?? undefined,
+    pendingToolCall: toPendingToolCall(row.pendingToolCall),
     lastErrorCode: row.lastErrorCode ?? undefined,
     lastErrorMessage: row.lastErrorMessage ?? undefined,
     createdAt: row.createdAt,
@@ -210,6 +219,7 @@ export async function markInvocationSucceeded(
         result_text = ${result.resultText},
         provider = ${result.provider ?? null},
         model = ${result.model ?? null},
+        pending_tool_call = null,
         completed_at = now(),
         failed_at = null,
         ${CLEAR_CLAIM},
@@ -219,6 +229,31 @@ export async function markInvocationSucceeded(
     returning id
   `);
   return updated.rows.length > 0;
+}
+
+// A parked run is a pause, not a failed attempt: hand the attempt back.
+export async function markInvocationAwaitingApproval(
+  db: Database,
+  id: number,
+  workerId: string,
+  runId: string,
+  pendingToolCall: PendingToolCall,
+): Promise<InvocationRow | undefined> {
+  const updated = await db.execute(sql`
+    update agent_runtime.invocations
+    set status = 'awaiting_approval',
+        pending_tool_call = ${JSON.stringify(pendingToolCall)}::jsonb,
+        attempt_count = greatest(attempt_count - 1, 0),
+        last_error_code = null,
+        last_error_message = null,
+        ${CLEAR_CLAIM},
+        updated_at = now()
+    where id = ${id} and claimed_by = ${workerId} and status = 'running'
+      and active_run_id = ${runId}
+    returning *
+  `);
+  const raw = updated.rows[0] as Record<string, unknown> | undefined;
+  return raw ? mapRow(raw) : undefined;
 }
 
 // Claim already counted this attempt; failure must not increment it again.
@@ -236,6 +271,7 @@ export async function markInvocationFailed(
         next_attempt_at = now() + (${retryDelayMs} * interval '1 millisecond'),
         failed_at = case when attempt_count >= max_attempts then now() else failed_at end,
         completed_at = case when attempt_count >= max_attempts then now() else completed_at end,
+        pending_tool_call = case when attempt_count >= max_attempts then null else pending_tool_call end,
         last_error_code = ${error.code},
         last_error_message = ${error.message},
         ${CLEAR_CLAIM},
