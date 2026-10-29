@@ -14,8 +14,11 @@ import type {
   NeutralMessage,
   RuntimeInvocationInput,
   RuntimeMetrics,
+  ToolCallAuditEvent,
+  ToolCallAuditSink,
 } from '../contracts/runtime';
 import { AiSdkNativeRuntime } from './ai-sdk-runtime';
+import { deriveToolCallIdempotencyKey } from './canonical-json';
 import { openAiCompatible } from './model';
 import { PolicyEngine } from './policy-engine';
 
@@ -178,6 +181,8 @@ function runtime(
     onMetrics?: (metrics: RuntimeMetrics) => void;
     policies?: RuntimePolicies;
     onPolicyDecision?: (decision: PolicyDecision) => void;
+    onToolCallAudit?: ToolCallAuditSink;
+    toolError?: Error;
   } = {},
 ) {
   const model = new MockLanguageModelV4({
@@ -185,7 +190,10 @@ function runtime(
     modelId: 'mock-model',
     doGenerate: responses,
   });
-  const callTool = vi.fn().mockResolvedValue('[{"type":"text","text":"ok"}]');
+  const callTool = vi.fn().mockImplementation(async () => {
+    if (options.toolError) throw options.toolError;
+    return '[{"type":"text","text":"ok"}]';
+  });
   const close = vi.fn().mockResolvedValue(undefined);
   const open = vi.fn().mockResolvedValue({ callTool, close });
   const loadSystemPrompt = vi
@@ -201,6 +209,7 @@ function runtime(
     now: options.now,
     onMetrics: options.onMetrics,
     onPolicyDecision: options.onPolicyDecision,
+    onToolCallAudit: options.onToolCallAudit,
     policies: {
       ...options.policies,
       ...(options.maxToolCallsPerInvocation !== undefined
@@ -671,6 +680,186 @@ describe('AiSdkNativeRuntime', () => {
     expect(subject.callTool).not.toHaveBeenCalled();
   });
 
+  it('derives idempotency keys that ignore object key order only', () => {
+    const a = deriveToolCallIdempotencyKey('inv-1', 'tool', {
+      nested: { a: 1, b: 2 },
+      values: [1, 2],
+    });
+    const b = deriveToolCallIdempotencyKey('inv-1', 'tool', {
+      values: [1, 2],
+      nested: { b: 2, a: 1 },
+    });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      deriveToolCallIdempotencyKey('inv-1', 'tool', { values: [2, 1] }),
+    ).not.toBe(
+      deriveToolCallIdempotencyKey('inv-1', 'tool', { values: [1, 2] }),
+    );
+    expect(deriveToolCallIdempotencyKey('inv-2', 'tool', { v: 1 })).not.toBe(
+      deriveToolCallIdempotencyKey('inv-1', 'tool', { v: 1 }),
+    );
+  });
+
+  it('emits started and succeeded audit events for an executed call', async () => {
+    const events: ToolCallAuditEvent[] = [];
+    const subject = runtime(
+      [
+        toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      { onToolCallAudit: (event) => void events.push(event) },
+    );
+    await subject.instance.invoke(invocation);
+    expect(events.map((event) => event.phase)).toEqual([
+      'started',
+      'succeeded',
+    ]);
+    expect(events[0]).toMatchObject({
+      scope: invocation.scope,
+      invocationId: invocation.invocationId,
+      runId: invocation.runId,
+      toolName: directoryTools.get,
+      toolCallId: 'call-1',
+      input: { recordId: 7 },
+    });
+    expect(events[0]?.idempotencyKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(events[1]?.idempotencyKey).toBe(events[0]?.idempotencyKey);
+    expect(subject.callTool).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: events[0]?.idempotencyKey }),
+    );
+  });
+
+  it('emits a failed audit event when the MCP call throws', async () => {
+    const events: ToolCallAuditEvent[] = [];
+    const subject = runtime(
+      [toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 }))],
+      {
+        onToolCallAudit: (event) => void events.push(event),
+        toolError: new Error('server exploded'),
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toThrow();
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed']);
+    expect(events[1]?.errorCode).toBe('tool_call_failed');
+  });
+
+  it('keeps retry and approval keys stable while separating parallel dispatches', async () => {
+    const events: ToolCallAuditEvent[] = [];
+    const responses = [
+      toolStep(
+        toolCall('same', directoryTools.get, { recordId: 7 }),
+        toolCall('same', directoryTools.get, { recordId: 7 }),
+      ),
+      textStep('Done'),
+    ];
+    const subject = runtime(responses, {
+      policies: { exactlyOneToolCallPerStep: false },
+      onToolCallAudit: (event) => void events.push(event),
+    });
+    await subject.instance.invoke(invocation);
+    const rerun = runtime(
+      [
+        toolStep(toolCall('approved', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      {
+        policies: { requireApproval: [directoryTools.get] },
+        onToolCallAudit: (event) => void events.push(event),
+      },
+    );
+    await rerun.instance.invoke({
+      ...invocation,
+      runId: 'next-run',
+      approvedToolCall: {
+        toolName: directoryTools.get,
+        input: { recordId: 7 },
+      },
+    });
+    const starts = events.filter((event) => event.phase === 'started');
+    expect(starts).toHaveLength(3);
+    expect(new Set(starts.map((event) => event.idempotencyKey)).size).toBe(1);
+    expect(new Set(starts.map((event) => event.dispatchId)).size).toBe(3);
+    for (const start of starts)
+      expect(
+        events
+          .filter((event) => event.dispatchId === start.dispatchId)
+          .map((event) => event.phase),
+      ).toEqual(['started', 'succeeded']);
+  });
+
+  it('emits no audit events for a policy-denied call', async () => {
+    const events: ToolCallAuditEvent[] = [];
+    const subject = runtime(
+      [toolStep(toolCall('gated', directoryTools.get, { recordId: 7 }))],
+      {
+        policies: { requireApproval: [directoryTools.get] },
+        onToolCallAudit: (event) => void events.push(event),
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      diagnostics: { code: 'approval_required' },
+    });
+    expect(events).toEqual([]);
+    expect(subject.callTool).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch when the started audit write fails', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      {
+        onToolCallAudit: () => {
+          throw new Error('audit store down');
+        },
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      diagnostics: { code: 'audit_persistence_failed' },
+    });
+    expect(subject.callTool).not.toHaveBeenCalled();
+  });
+
+  it('prioritizes a failed audit write over the original MCP error', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
+        textStep('must not be requested'),
+      ],
+      {
+        toolError: new Error('MCP failed'),
+        onToolCallAudit: (event) => {
+          if (event.phase === 'failed') throw new Error('audit store down');
+        },
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      diagnostics: { code: 'audit_persistence_failed' },
+    });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+  });
+
+  it('fails the invocation when the succeeded audit write fails', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      {
+        onToolCallAudit: (event) => {
+          if (event.phase === 'succeeded') throw new Error('audit store down');
+        },
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      diagnostics: { code: 'audit_persistence_failed' },
+    });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+  });
+
   it('reuses the AI SDK loop for one tool, one MCP session, and final text', async () => {
     const subject = runtime([
       toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
@@ -696,6 +885,7 @@ describe('AiSdkNativeRuntime', () => {
       name: directoryTools.get,
       arguments: { recordId: 7 },
       timeoutMs: expect.any(Number),
+      idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     expect(subject.close).toHaveBeenCalledOnce();
     expect(JSON.stringify(subject.model.doGenerateCalls[1]?.prompt)).toContain(

@@ -20,6 +20,10 @@ import {
   toPendingToolCall,
   toRecord,
 } from '../db/repositories/invocations';
+import {
+  claimToolCallAudit,
+  completeToolCallAudit,
+} from '../db/repositories/tool-call-audits';
 import type { InvocationRow } from '../db/schema';
 import { RUNTIME_INTERNALS, type RuntimeInternals } from '../define-runtime';
 
@@ -111,6 +115,44 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         );
       },
     );
+    const auditIds = new Map<string, number>();
+    const unsubscribeAudit = internals?.onToolCallAudit?.(async (event) => {
+      if (
+        event.invocationId !== String(row.id) ||
+        event.runId !== row.activeRunId
+      )
+        return;
+      if (event.phase === 'started') {
+        const auditId = await claimToolCallAudit(db, {
+          invocationId: event.invocationId,
+          scope: event.scope,
+          runId: event.runId,
+          dispatchId: event.dispatchId,
+          toolName: event.toolName,
+          idempotencyKey: event.idempotencyKey,
+          requestSnapshot: event.input ?? null,
+          metadata: event.toolCallId
+            ? { toolCallId: event.toolCallId }
+            : undefined,
+        });
+        auditIds.set(event.dispatchId, auditId);
+        return;
+      }
+      const auditId = auditIds.get(event.dispatchId);
+      if (auditId === undefined)
+        throw new Error('Tool audit completion has no started event');
+      const completed = await completeToolCallAudit(
+        db,
+        auditId,
+        event.phase,
+        event.errorCode,
+        event.runId,
+        event.dispatchId,
+      );
+      if (!completed)
+        throw new Error('Tool audit completion lost its dispatch claim');
+      auditIds.delete(event.dispatchId);
+    });
     let leaseLost = false;
     const heartbeat = setInterval(() => {
       void heartbeatInvocation(
@@ -137,6 +179,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         });
       } finally {
         unsubscribe?.();
+        unsubscribeAudit?.();
         await Promise.all(auditWrites);
         if (auditError)
           throw new AgentRuntimeError(

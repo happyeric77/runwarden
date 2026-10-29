@@ -34,6 +34,8 @@ export type {
   RuntimeInvocationInput,
   RuntimeMetrics,
   SystemPromptLoader,
+  ToolCallAuditEvent,
+  ToolCallAuditSink,
 } from './contracts/runtime';
 
 export type {
