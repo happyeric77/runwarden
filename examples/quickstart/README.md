@@ -2,7 +2,7 @@
 
 The whole Runwarden story in one run, with a real model: a worker executes
 two invocations out of Postgres, the model's tool calls go through a tiny
-MCP server — and when the model reaches for an approval-gated refund,
+MCP server, and when the model reaches for an approval-gated refund,
 policy stops it. Every ruling lands in the audit tables for you to inspect
 at the end.
 
@@ -19,7 +19,7 @@ pnpm quickstart
 
 Optional: `MODEL_BASE_URL` (default `https://api.openai.com/v1`) and
 `MODEL_ID` (default `gpt-4o-mini`). A local model server (Ollama, vLLM,
-...) works too — point `MODEL_BASE_URL` at it and use any non-empty
+...) works too: point `MODEL_BASE_URL` at it and use any non-empty
 `MODEL_API_KEY`.
 
 That is all. The script creates the schema (`initDb`), starts a worker,
@@ -33,10 +33,10 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
 
 ## What you should see
 
-1. **Story 1 — a real lookup.** You ask for the roadmap note. The model
+1. **Story 1: a real lookup.** You ask for the roadmap note. The model
    calls `notes__search` through MCP, reads the result, and answers with
    what the note says. The invocation succeeds.
-2. **Story 2 — approval gate.** You ask for a refund of order 42, specifying
+2. **Story 2: approval gate.** You ask for a refund of order 42, specifying
    5000 cents and the reason "duplicate charge", and request the refund tool. The
    model proposes `billing__refund`, which is listed in `requireApproval`.
    The call is denied and recorded as `approval_requested`; the refund
@@ -59,10 +59,10 @@ summary follows the recorded evidence, and both invocations are always audited.
 - `defineRuntime({ db, provider, mcpServers, tools, policies })` assembled
   the runtime; `requireApproval: ['billing__refund']` is the whole
   governance configuration. The `provider` block is the only place a model
-  is configured — change its `baseUrl` / `model` and nothing else moves.
+  is configured; change its `baseUrl` / `model` and nothing else moves.
 - `runtime.invoke()` enqueued each invocation; `runWorker()` claimed it
   under lease and executed it. The worker runs in the same process here
-  only to keep the quickstart to one command — in production it is its
+  only to keep the quickstart to one command; in production it is its
   own process (see the [durable example](../durable/README.md), which
   splits app and worker into separate processes).
 - Policy is enforced on the execution path by the runtime, not by asking
@@ -71,5 +71,5 @@ summary follows the recorded evidence, and both invocations are always audited.
 
 Want the deterministic, no-key version of the policy story?
 `pnpm demo` ([`examples/governed-invocation.ts`](../governed-invocation.ts))
-runs the exactly-one correction loop in-process with a scripted model —
+runs the exactly-one correction loop in-process with a scripted model:
 no database, no API key.

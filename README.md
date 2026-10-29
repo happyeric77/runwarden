@@ -16,45 +16,45 @@ policy and a per-call audit trail, durable on your own Postgres.
 
 Agent runs rarely fail by crashing. They fail by staying alive and doing
 the wrong thing: picking the wrong tool, calling it twice, or reaching for
-something sensitive nobody approved — while prompt-level rules ("never do
+something sensitive nobody approved, while prompt-level rules ("never do
 X") get quietly ignored by the model.
 
 Runwarden puts the rules in the runtime instead of the prompt. You define
-the runtime once — model, MCP tool servers, policies — and every tool call
+the runtime once (model, MCP tool servers, policies), and every tool call
 the model proposes is checked against policy before it executes. Every
 ruling is written to Postgres as an audit row. Underneath, invocations are
 durable: queued in your database, claimed by workers under leases, retried
 with backoff.
 
 It is built for indie developers and solo founders putting agents in front
-of real users — for the day your agent first does something wrong in front
+of real users: for the day your agent first does something wrong in front
 of one of them.
 
 DBOS gives you durable execution for workflows and functions. Runwarden's
-headline is governing what an agent may do — enforced tool-call policy and
-per-call audit — with durable execution as the substrate underneath.
+headline is governing what an agent may do (enforced tool-call policy and
+per-call audit), with durable execution as the substrate underneath.
 
 ## Features
 
-- **Enforced tool-call policy** — exactly one tool call per model step, a
+- **Enforced tool-call policy**: exactly one tool call per model step, a
   tool allowlist, and per-tool input validation, all checked in the runtime
   between the model's proposal and execution. A violating call executes
   nothing.
-- **Correction loop** — a denied call returns a correction the model can
+- **Correction loop**: a denied call returns a correction the model can
   act on, within a bounded correction budget, instead of failing silently
   or looping forever.
-- **Approvals, fail-closed** — list a tool in `requireApproval` and a
+- **Approvals, fail-closed**: list a tool in `requireApproval` and a
   proposal to call it is stopped and recorded as `approval_requested`.
   Nothing sensitive executes unapproved.
-- **Audit trail in Postgres** — every invocation and every policy decision
+- **Audit trail in Postgres**: every invocation and every policy decision
   is a row in the `agent_runtime` schema, queryable with plain SQL.
-- **Durable execution** — invocations are claimed by workers under leases
+- **Durable execution**: invocations are claimed by workers under leases
   with heartbeats, retried with backoff, and fenced so a stale worker
   cannot overwrite a newer attempt. Delivery is at-least-once; idempotency
   keys guard side effects.
-- **MCP-first tools** — tools execute through MCP servers you run;
+- **MCP-first tools**: tools execute through MCP servers you run;
   Runwarden governs, the server executes.
-- **Your database** — `runwarden init` creates the schema in your own
+- **Your database**: `runwarden init` creates the schema in your own
   Postgres. No hosted service, no separate state store.
 
 ## Quick Start
@@ -63,10 +63,10 @@ per-call audit — with durable execution as the substrate underneath.
 
 - Node.js 22 or newer
 - pnpm 10
-- Docker, to run Postgres for the example (or your own Postgres — set
+- Docker, to run Postgres for the example (or your own Postgres: set
   `DATABASE_URL` and skip the compose step)
 - A model API key for any OpenAI-compatible endpoint (or a local model
-  server — see the quickstart README)
+  server; see the quickstart README)
 
 ```sh
 git clone https://github.com/happyeric77/runwarden.git
@@ -79,14 +79,14 @@ pnpm quickstart
 
 The quickstart runs the full story against a local MCP server with a
 real model: a note lookup that executes through MCP, and a refund stopped
-by `requireApproval` — then it prints both invocations and their policy decisions
+by `requireApproval`. It then prints both invocations and their policy decisions
 from Postgres. Occasionally the model responds with text instead of proposing
 the refund tool; the example reports that nothing was intercepted rather than
 claiming a blocked call. The [quickstart README](examples/quickstart/README.md)
 walks through each step and what you should see.
 
-For the production-shaped setup — separate app and worker processes and a
-real model provider — see [examples/durable](examples/durable/README.md).
+For the production-shaped setup (separate app and worker processes and a
+real model provider), see [examples/durable](examples/durable/README.md).
 
 ## How It Works
 
@@ -97,7 +97,7 @@ real model provider — see [examples/durable](examples/durable/README.md).
 3. A worker started with `runWorker()` claims queued invocations under a
    lease, heartbeating while it runs; expired leases are reclaimed.
 4. At every model step, the proposed tool calls are checked against
-   policy — exactly-one, allowlist, input validation, `requireApproval` —
+   policy (exactly-one, allowlist, input validation, `requireApproval`)
    before anything executes through MCP.
 5. Every ruling lands in `policy_decisions` and the invocation's state in
    `invocations`, so the whole run can be reconstructed from SQL.
@@ -174,10 +174,10 @@ erDiagram
     }
 ```
 
-`worker_leases` stands alone on purpose — it is a named-lock table; each
+`worker_leases` stands alone on purpose. It is a named-lock table; each
 invocation's lease state lives on the invocation row itself.
 
-The end of a quickstart run prints that trail — a typical run:
+The end of a quickstart run prints that trail. A typical run:
 
 ```text
 [audit] what landed in Postgres:
@@ -188,7 +188,7 @@ The end of a quickstart run prints that trail — a typical run:
 
 ## Limitations
 
-- **Not for massive throughput:** Runwarden targets indie and solo scale —
+- **Not for massive throughput:** Runwarden targets indie and solo scale:
   agents in front of your users, not a high-volume job platform.
 - **Single region:** one Postgres is the state store. There is no
   multi-region story.

@@ -38,7 +38,7 @@ const billingRefund: ToolDefinition = {
 const modelKey = process.env.MODEL_API_KEY;
 if (!modelKey) {
   console.error(
-    '[quickstart] Set MODEL_API_KEY first — any OpenAI-compatible endpoint ' +
+    '[quickstart] Set MODEL_API_KEY first. Any OpenAI-compatible endpoint ' +
       'works; for a local model server, any non-empty value. ' +
       'See examples/quickstart/README.md.',
   );
