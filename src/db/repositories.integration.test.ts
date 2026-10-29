@@ -2,11 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDb, type DatabaseHandle } from './client';
 import { initDb } from './init';
+import { resolveInvocationApproval } from './repositories/approvals';
 import {
   claimInvocations,
   enqueueInvocation,
   getInvocationRowById,
   heartbeatInvocation,
+  markInvocationAwaitingApproval,
   markInvocationFailed,
   markInvocationSucceeded,
 } from './repositories/invocations';
@@ -298,5 +300,217 @@ describe('invocation repositories', () => {
     await expect(
       tryAcquireWorkerLease(handle.db, 'main-worker', 'holder-b', 30_000),
     ).resolves.toBe(true);
+  });
+
+  it.each(['approved', 'rejected'] as const)(
+    'resolves concurrent approval/%s exactly once',
+    async (other) => {
+      const pending = {
+        toolName: 'gated',
+        input: { nested: { a: 1 }, values: [1, 2] },
+      };
+      const { invocationId } = await enqueueInvocation(handle.db, {
+        scope: 'race',
+        prompt: 'approve',
+      });
+      const [row] = await claimInvocations(handle.db, 'approval-worker', {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 1,
+      });
+      expect(String(row!.id)).toBe(invocationId);
+      await markInvocationAwaitingApproval(
+        handle.db,
+        row!.id,
+        'approval-worker',
+        row!.activeRunId!,
+        pending,
+      );
+      const client = await handle.pool.connect();
+      try {
+        await client.query('begin');
+        await client.query(
+          'select id from agent_runtime.invocations where id=$1 for update',
+          [invocationId],
+        );
+        const first = resolveInvocationApproval(
+          handle.db,
+          invocationId,
+          'approved',
+          { resolvedBy: 'reviewer', note: 'checked' },
+        );
+        const second = resolveInvocationApproval(
+          handle.db,
+          invocationId,
+          other,
+          { resolvedBy: 'reviewer', note: 'checked' },
+        );
+        expect(
+          await claimInvocations(handle.db, 'interleaved', {
+            leaseTimeoutMs: 30_000,
+            maxBatchSize: 1,
+          }),
+        ).toEqual([]);
+        expect(
+          await heartbeatInvocation(
+            handle.db,
+            row!.id,
+            'approval-worker',
+            row!.activeRunId!,
+            30_000,
+          ),
+        ).toBe(false);
+        await client.query('commit');
+        const results = await Promise.all([first, second]);
+        expect(results.map((result) => result.outcome).sort()).toEqual([
+          'not_awaiting',
+          'resolved',
+        ]);
+        const audits = await handle.pool.query(
+          'select decision, detail, tool_name from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        );
+        expect(audits.rows).toEqual([
+          {
+            decision:
+              results.find((result) => result.outcome === 'resolved')!.row
+                .status === 'cancelled'
+                ? 'rejected'
+                : 'approved',
+            tool_name: 'gated',
+            detail: {
+              toolInput: pending.input,
+              resolvedBy: 'reviewer',
+              note: 'checked',
+            },
+          },
+        ]);
+        // Finish the surviving grant so subsequent claim tests stay isolated.
+        const [claimed] = await claimInvocations(handle.db, 'cleanup', {
+          leaseTimeoutMs: 30_000,
+          maxBatchSize: 1,
+        });
+        if (claimed)
+          await markInvocationSucceeded(
+            handle.db,
+            claimed.id,
+            'cleanup',
+            claimed.activeRunId!,
+            { resultText: 'done' },
+          );
+      } finally {
+        await client.query('rollback');
+        client.release();
+      }
+    },
+  );
+
+  it('rolls back approval when its audit insert fails, then retains a grant only across retries', async () => {
+    const pending = { toolName: 'gated', input: { amount: 5000 } };
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'approval-retry',
+      prompt: 'approve',
+      maxAttempts: 2,
+      orderingKey: 'approval-order',
+    });
+    const [row] = await claimInvocations(handle.db, 'approval-retry', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    expect(String(row!.id)).toBe(invocationId);
+    expect(
+      await markInvocationAwaitingApproval(
+        handle.db,
+        row!.id,
+        'wrong-worker',
+        row!.activeRunId!,
+        pending,
+      ),
+    ).toBeUndefined();
+    expect(
+      await markInvocationAwaitingApproval(
+        handle.db,
+        row!.id,
+        'approval-retry',
+        '00000000-0000-4000-8000-000000000000',
+        pending,
+      ),
+    ).toBeUndefined();
+    await markInvocationAwaitingApproval(
+      handle.db,
+      row!.id,
+      'approval-retry',
+      row!.activeRunId!,
+      pending,
+    );
+    const follower = await enqueueInvocation(handle.db, {
+      scope: 'approval-retry',
+      prompt: 'next',
+      orderingKey: 'approval-order',
+    });
+    expect(
+      await claimInvocations(handle.db, 'blocked', {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 1,
+      }),
+    ).toEqual([]);
+    await handle.pool.query(
+      `create function agent_runtime.fail_resolution() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger fail_resolution before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.fail_resolution()',
+    );
+    try {
+      await expect(
+        resolveInvocationApproval(handle.db, invocationId, 'approved'),
+      ).rejects.toThrow();
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      expect(parked?.status).toBe('awaiting_approval');
+      expect(parked?.pendingToolCall).toEqual(pending);
+      expect(
+        (
+          await handle.pool.query(
+            'select * from agent_runtime.policy_decisions where invocation_id=$1',
+            [invocationId],
+          )
+        ).rows,
+      ).toEqual([]);
+    } finally {
+      await handle.pool.query(
+        'drop trigger fail_resolution on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.fail_resolution()');
+    }
+    await resolveInvocationApproval(handle.db, invocationId, 'approved');
+    for (const status of ['pending', 'failed']) {
+      const [claimed] = await claimInvocations(handle.db, 'approval-retry', {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 1,
+      });
+      expect(claimed!.pendingToolCall).toEqual(pending);
+      const failed = await markInvocationFailed(
+        handle.db,
+        claimed!.id,
+        'approval-retry',
+        claimed!.activeRunId!,
+        { code: 'test', message: 'failed' },
+        0,
+      );
+      expect(failed?.status).toBe(status);
+      expect(failed?.pendingToolCall).toEqual(
+        status === 'pending' ? pending : null,
+      );
+    }
+    const [next] = await claimInvocations(handle.db, 'successor', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    expect(String(next!.id)).toBe(follower.invocationId);
+    await markInvocationSucceeded(
+      handle.db,
+      next!.id,
+      'successor',
+      next!.activeRunId!,
+      { resultText: 'done' },
+    );
   });
 });
