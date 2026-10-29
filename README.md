@@ -43,9 +43,13 @@ per-call audit), with durable execution as the substrate underneath.
 - **Correction loop**: a denied call returns a correction the model can
   act on, within a bounded correction budget, instead of failing silently
   or looping forever.
-- **Approvals, fail-closed**: list a tool in `requireApproval` and a
-  proposal to call it is stopped and recorded as `approval_requested`.
-  Nothing sensitive executes unapproved.
+- **Approvals, in your database**: list a tool in `requireApproval` and
+  a proposal to call it parks the invocation in `awaiting_approval`,
+  with the proposed call stored on the row and the request recorded as
+  `approval_requested`. Your app lists and resolves pending approvals
+  through the library API. Approval reruns the whole invocation and
+  only the exact approved call passes; rejection cancels it. Nothing
+  sensitive executes unapproved.
 - **Audit trail in Postgres**: every invocation and every policy decision
   is a row in the `agent_runtime` schema, queryable with plain SQL.
 - **Durable execution**: invocations are claimed by workers under leases
@@ -78,11 +82,13 @@ pnpm quickstart
 ```
 
 The quickstart runs the full story against a local MCP server with a
-real model: a note lookup that executes through MCP, and a refund stopped
-by `requireApproval`. It then prints both invocations and their policy decisions
-from Postgres. Occasionally the model responds with text instead of proposing
+real model: a note lookup that executes through MCP, and a refund parked
+by `requireApproval`, approved in the script, and rerun to completion.
+It then prints both invocations and their policy decisions from Postgres. Occasionally the model responds with text instead of proposing
 the refund tool; the example reports that nothing was intercepted rather than
-claiming a blocked call. The [quickstart README](examples/quickstart/README.md)
+claiming a blocked call. After approval, a text-only response does not prove a
+refund executed; changed arguments park again without automatic approval. The
+summary reports those outcomes from the audit rows. The [quickstart README](examples/quickstart/README.md)
 walks through each step and what you should see.
 
 For the production-shaped setup (separate app and worker processes and a
@@ -101,6 +107,10 @@ real model provider), see [examples/durable](examples/durable/README.md).
    before anything executes through MCP.
 5. Every ruling lands in `policy_decisions` and the invocation's state in
    `invocations`, so the whole run can be reconstructed from SQL.
+6. If a proposed call is listed in `requireApproval`, the invocation
+   parks in `awaiting_approval` instead of failing. Your app resolves it
+   with `approveInvocation` or `rejectInvocation`. Approval reruns the
+   whole invocation; rejection cancels it.
 
 All of it lives in four tables in the `agent_runtime` schema:
 
@@ -182,8 +192,10 @@ The end of a quickstart run prints that trail. A typical run:
 ```text
 [audit] what landed in Postgres:
   invocation <id>: status=succeeded attempts=1
-  invocation <id>: status=failed attempts=1 error=approval_required
+  invocation <id>: status=succeeded attempts=1
   policy_decision invocation=<id> rule=require_approval decision=approval_requested tool=billing__refund
+  policy_decision invocation=<id> rule=require_approval decision=approved tool=billing__refund
+  policy_decision invocation=<id> rule=require_approval decision=allow tool=billing__refund
 ```
 
 ## Limitations
@@ -197,10 +209,12 @@ The end of a quickstart run prints that trail. A typical run:
 - **Invocation-level durability only:** a crashed or expired invocation
   retries the whole run, at-least-once. There is no step-level
   checkpointing and no multi-day workflow orchestration.
-- **Approvals are fail-closed, not resumable:** `requireApproval` stops
-  the invocation with `approval_required` and records the request. An
-  approve-and-rerun flow is a later slice; today, approving means
-  re-running the invocation yourself.
+- **Approvals are API-only, and rerun the whole invocation:** there is
+  no approval inbox or UI; your app resolves pending approvals through
+  the library API. Approval does not resume mid-run. The invocation
+  reruns from the start, earlier tool calls can execute again, and
+  idempotency keys guard their side effects. That cost is the price of
+  invocation-level durability in v1.
 - **Audit scope today:** invocations and policy decisions are recorded.
   The `tool_call_audits` table ships ahead of its writer, which lands in a
   later slice.

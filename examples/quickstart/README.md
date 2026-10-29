@@ -3,7 +3,8 @@
 The whole Runwarden story in one run, with a real model: a worker executes
 two invocations out of Postgres, the model's tool calls go through a tiny
 MCP server, and when the model reaches for an approval-gated refund,
-policy stops it. Every ruling lands in the audit tables for you to inspect
+policy parks the invocation in `awaiting_approval` until the script
+approves it. Every ruling lands in the audit tables for you to inspect
 at the end.
 
 ## Run it
@@ -39,20 +40,28 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
 2. **Story 2: approval gate.** You ask for a refund of order 42, specifying
    5000 cents and the reason "duplicate charge", and request the refund tool. The
    model proposes `billing__refund`, which is listed in `requireApproval`.
-   The call is denied and recorded as `approval_requested`; the refund
-   tool never executes and the invocation ends `failed` with code
-   `approval_required`. That is fail-closed governance working as
-   intended: in v1 there is no approval inbox yet, so a gated call simply
-   does not run. Occasionally the model responds with text instead of proposing
-   a tool call. In that case, the script prints its response and reports that
-   nothing was intercepted, rather than claiming the gate blocked a call.
+   The call does not execute. The invocation parks in `awaiting_approval`
+   with the proposed call stored on its row, and the request is recorded
+   as `approval_requested`. The script then plays the host app: it lists
+   the pending approval with `listPendingApprovals`, approves it with
+   `approveInvocation`, and the worker reruns the invocation from the
+   start. If the model proposes the exact approved call, it passes the approval
+   gate, subject to the other policies, including the tool-call budget. Approval reruns the whole
+   invocation, so tool calls from earlier in the run can execute again;
+   idempotency keys are what guard their side effects. Occasionally the
+   model responds with text instead of proposing a tool call, even after approval.
+   The script prints that response without claiming the refund executed. Changed
+   arguments require a new approval; the script leaves that request pending
+   rather than auto-approving it again.
 3. **The audit trail.** The script queries `agent_runtime.invocations`
    and `agent_runtime.policy_decisions` and prints both: statuses,
    attempt counts, and the ruling behind every step above.
 
 The model's wording and whether it proposes a tool call vary from run to run.
 Whenever it proposes `billing__refund`, the runtime gates that call; the final
-summary follows the recorded evidence, and both invocations are always audited.
+summary follows the recorded evidence. Both invocation rows and their policy
+decisions are printed even if the refund rerun fails or parks again. An `allow`
+ruling proves policy authorization, not the tool's side effect.
 
 ## What just happened, in library terms
 
@@ -65,9 +74,16 @@ summary follows the recorded evidence, and both invocations are always audited.
   only to keep the quickstart to one command; in production it is its
   own process (see the [durable example](../durable/README.md), which
   splits app and worker into separate processes).
+- `invoke()` and `waitForInvocation()` surface `approval_required` as soon as
+  the invocation parks. Approval does not guarantee the model will propose the
+  same call on its rerun; changed arguments need another approval.
 - Policy is enforced on the execution path by the runtime, not by asking
   the model nicely: a proposed gated tool call is stopped before the MCP
   server ever sees it.
+- The approval flow is library API, not a UI: `listPendingApprovals`,
+  `approveInvocation`, and `rejectInvocation` are the same calls a host
+  app (an admin page, a CLI, a chat bot) would make. Approval requeues
+  the invocation; rejection cancels it with `approval_rejected`.
 
 Want the deterministic, no-key version of the policy story?
 `pnpm demo` ([`examples/governed-invocation.ts`](../governed-invocation.ts))

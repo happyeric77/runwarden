@@ -202,6 +202,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
           runId: input.runId,
         }),
       correctionForInvalidCall: (call) => this.correctionFor(call),
+      approvedToolCall: input.approvedToolCall,
     });
 
     try {
@@ -247,6 +248,8 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         toolApproval: ({ toolCall }) =>
           policy.approvalFor({
             toolName: toolCall.toolName,
+            toolCallId: toolCall.toolCallId,
+            toolInput: toolCall.input,
             proposalCount: state.currentProposalCount,
             scope: input.scope,
           }),
