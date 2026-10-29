@@ -448,7 +448,7 @@ describe('durable defineRuntime', () => {
           async callTool() {
             executedTools++;
             return JSON.stringify([
-              { type: 'text', text: 'Note found: "Roadmap" — ship it.' },
+              { type: 'text', text: 'Note found: "Roadmap": ship it.' },
             ]);
           },
           async close() {},
