@@ -100,6 +100,53 @@ real model provider — see [examples/durable](examples/durable/README.md).
 5. Every ruling lands in `policy_decisions` and the invocation's state in
    `invocations`, so the whole run can be reconstructed from SQL.
 
+All of it lives in four tables in the `agent_runtime` schema:
+
+```mermaid
+erDiagram
+    invocations ||--o{ policy_decisions : "rules on"
+    invocations ||--o{ tool_call_audits : "executes"
+
+    invocations {
+        bigint id PK
+        text scope
+        text status "pending | running | awaiting_approval | succeeded | failed | cancelled"
+        jsonb input
+        text result_text
+        text idempotency_key UK
+        int attempt_count
+        uuid active_run_id
+        text last_error_code
+        timestamptz created_at
+    }
+    policy_decisions {
+        bigint id PK
+        bigint invocation_id FK
+        uuid run_id
+        text rule
+        text decision
+        text tool_name
+        jsonb detail
+        timestamptz created_at
+    }
+    tool_call_audits {
+        bigint id PK
+        bigint invocation_id FK
+        uuid run_id
+        text tool_name
+        text status "started | succeeded | failed"
+        timestamptz requested_at
+    }
+    worker_leases {
+        text name PK
+        text holder_id
+        timestamptz expires_at
+    }
+```
+
+`worker_leases` stands alone on purpose — it is a named-lock table; each
+invocation's lease state lives on the invocation row itself.
+
 The end of a quickstart run prints that trail — a typical run:
 
 ```text
