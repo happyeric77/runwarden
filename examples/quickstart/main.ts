@@ -108,26 +108,31 @@ try {
     console.log(
       '\n[app] story 2: a refund that policy gates on human approval',
     );
-    let refundId: string | undefined;
+    let refundId: string;
     try {
-      await runtime.invoke({
+      const refund = await runtime.invoke({
         scope: 'demo',
-        prompt: 'Refund the charge for order 42.',
+        prompt:
+          'Refund the charge for order 42 using the refund tool: amount 5000 cents, reason: duplicate charge.',
         maxAttempts: 1,
       });
-      console.log('[app] UNEXPECTED: the refund invocation succeeded');
+      refundId = refund.invocationId;
+      console.log(`[app] invocation ${refundId}: ${refund.text}`);
     } catch (error) {
-      if (!(error instanceof AgentRuntimeError)) throw error;
-      refundId = error.diagnostics.invocationId as string;
+      if (
+        !(error instanceof AgentRuntimeError) ||
+        typeof error.diagnostics.invocationId !== 'string'
+      ) {
+        throw error;
+      }
+      refundId = error.diagnostics.invocationId;
       console.log(
-        `[app] invocation ${refundId} stopped as designed: ${error.message} ` +
+        `[app] invocation ${refundId} failed: ${error.message} ` +
           `(code: ${String(error.diagnostics.code)})`,
       );
     }
 
-    const ids = [search.invocationId, refundId].filter(
-      (id): id is string => id !== undefined,
-    );
+    const ids = [search.invocationId, refundId];
     const invocations = await db.pool.query(
       `select id, status, attempt_count, last_error_code
          from agent_runtime.invocations where id = any($1) order by id`,
@@ -152,10 +157,34 @@ try {
           `decision=${row.decision}${row.tool_name ? ` tool=${row.tool_name}` : ''}`,
       );
     }
-    console.log(
-      '\n[done] the search executed through MCP, the gated refund never ran, ' +
-        'and every ruling is in the audit tables.',
+    const refundDecisions = decisions.rows.filter(
+      (row) => String(row.invocation_id) === refundId,
     );
+    if (
+      refundDecisions.some(
+        (row) =>
+          row.rule === 'require_approval' &&
+          row.decision === 'approval_requested' &&
+          row.tool_name === 'billing__refund',
+      )
+    ) {
+      console.log(
+        '\n[done] the gated refund never ran: Postgres recorded approval_requested for billing__refund.',
+      );
+    } else if (
+      invocations.rows.some(
+        (row) => String(row.id) === refundId && row.status === 'succeeded',
+      ) &&
+      refundDecisions.length === 0
+    ) {
+      console.log(
+        '\n[done] the refund invocation succeeded with a model response; no gated call was proposed, so nothing was intercepted. The audit tables reflect this run.',
+      );
+    } else {
+      console.log(
+        '\n[done] no refund approval request was recorded. See the invocation outcome and policy decisions above.',
+      );
+    }
   } finally {
     await worker.stop();
   }
