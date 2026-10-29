@@ -76,5 +76,5 @@
   <text x="620" y="501" text-anchor="middle" font-size="12.5" fill="#334155" font-family="ui-monospace, Menlo, Consolas, monospace">invocations &#183; policy_decisions</text>
   <text x="620" y="519" text-anchor="middle" font-size="12.5" fill="#334155" font-family="ui-monospace, Menlo, Consolas, monospace">tool_call_audits &#183; worker_leases</text>
 
-  <text x="620" y="606" text-anchor="middle" font-size="13" font-style="italic" fill="#64748b">Your database, your workers, your audit trail — no hosted control plane.</text>
+  <text x="620" y="606" text-anchor="middle" font-size="13" font-style="italic" fill="#64748b">Your database, your workers, your audit trail. No hosted control plane.</text>
 </svg>
