@@ -110,39 +110,64 @@ erDiagram
     invocations {
         bigint id PK
         text scope
-        text status "pending | running | awaiting_approval | succeeded | failed | cancelled"
+        text conversation_id
+        text ordering_key
         jsonb input
         text result_text
-        text idempotency_key UK
+        text idempotency_key
+        invocation_status status "pending | running | awaiting_approval | succeeded | failed | cancelled"
         int attempt_count
+        int max_attempts
+        timestamptz next_attempt_at
+        timestamptz claimed_at
         text claimed_by
         timestamptz lease_heartbeat_at
         timestamptz lease_expires_at
         uuid active_run_id
+        timestamptz active_run_registered_at
+        jsonb pending_tool_call
+        timestamptz started_at
+        timestamptz completed_at
+        timestamptz failed_at
+        text provider
+        text model
         text last_error_code
+        text last_error_message
+        jsonb metadata
         timestamptz created_at
-    }
-    policy_decisions {
-        bigint id PK
-        bigint invocation_id FK
-        uuid run_id
-        text rule
-        text decision
-        text tool_name
-        jsonb detail
-        timestamptz created_at
+        timestamptz updated_at
     }
     tool_call_audits {
         bigint id PK
         bigint invocation_id FK
+        text scope
         uuid run_id
         text tool_name
-        text status "started | succeeded | failed"
+        text idempotency_key
+        tool_call_status status "started | succeeded | failed"
         timestamptz requested_at
+        timestamptz completed_at
+        text error_code
+        jsonb request_snapshot
+        jsonb metadata
+        timestamptz created_at
+    }
+    policy_decisions {
+        bigint id PK
+        text scope
+        bigint invocation_id FK
+        uuid run_id
+        text tool_name
+        text rule
+        text decision
+        jsonb detail
+        timestamptz created_at
     }
     worker_leases {
         text name PK
         text holder_id
+        timestamptz acquired_at
+        timestamptz heartbeat_at
         timestamptz expires_at
     }
 ```
