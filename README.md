@@ -12,6 +12,8 @@ policy and a per-call audit trail, durable on your own Postgres.
 
 ## Overview
 
+<img width="900" alt="Runwarden policy gate: an agent proposes tool calls, Runwarden checks each one against policy, allowed calls execute through MCP tools, approval-gated calls are stopped, and every ruling is written to Postgres" src="assets/gate-overview.svg" />
+
 Agent runs rarely fail by crashing. They fail by staying alive and doing
 the wrong thing: picking the wrong tool, calling it twice, or reaching for
 something sensitive nobody approved — while prompt-level rules ("never do
