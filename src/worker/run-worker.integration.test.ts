@@ -862,3 +862,291 @@ describe('approval state machine', () => {
     }
   });
 });
+
+describe('tool call audits', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function setup() {
+    const executed = { search: 0, refund: 0 };
+    let failNextSearch = false;
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool(call) {
+            if (call.name === 'notes__search') {
+              if (failNextSearch) {
+                failNextSearch = false;
+                throw new Error('mcp down');
+              }
+              executed.search++;
+              return JSON.stringify([
+                { type: 'text', text: 'The roadmap note says ship it.' },
+              ]);
+            }
+            executed.refund++;
+            return JSON.stringify([
+              { type: 'text', text: 'Refund issued for order 42.' },
+            ]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        });
+        if (promptText.includes('Refund issued')) {
+          return finish([{ type: 'text', text: 'Refund completed.' }]);
+        }
+        if (promptText.includes('roadmap note says')) {
+          return finish([{ type: 'text', text: 'Found the note.' }]);
+        }
+        if (promptText.includes('Refund order')) {
+          return finish([
+            {
+              type: 'tool-call',
+              toolCallId: 'call-refund',
+              toolName: 'billing__refund',
+              input: JSON.stringify({
+                amountCents: 5000,
+                reason: 'duplicate charge',
+              }),
+            },
+          ]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-search',
+            toolName: 'notes__search',
+            input: JSON.stringify({ query: 'roadmap' }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'notes__search',
+          description: 'Search the notes store by query text.',
+          inputSchema: z.object({ query: z.string().min(1) }),
+        },
+        {
+          name: 'billing__refund',
+          description: 'Refund a charge to the original payment method.',
+          inputSchema: z.object({
+            amountCents: z.number().int().positive(),
+            reason: z.string().min(1),
+          }),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are a helpful assistant.',
+      loadHistory: async () => [],
+      policies: { requireApproval: ['billing__refund'] },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 5_000,
+    });
+    return {
+      runtime,
+      worker,
+      executed,
+      failNextSearch: () => {
+        failNextSearch = true;
+      },
+    };
+  }
+
+  interface AuditRow {
+    id: number;
+    tool_name: string;
+    status: string;
+    idempotency_key: string;
+    error_code: string | null;
+    run_id: string;
+    scope: string;
+    request_snapshot: unknown;
+    completed_at: Date | null;
+  }
+
+  async function auditsFor(invocationId: string): Promise<AuditRow[]> {
+    const result = await handle.pool.query<AuditRow>(
+      `select id, tool_name, status, idempotency_key, error_code,
+              run_id::text as run_id, scope, request_snapshot, completed_at
+         from agent_runtime.tool_call_audits
+        where invocation_id = $1 order by id`,
+      [invocationId],
+    );
+    return result.rows;
+  }
+
+  it('writes a succeeded audit row for an executed call, none for a denied one', async () => {
+    const { runtime, worker, executed } = setup();
+    try {
+      const search = await runtime.enqueue({
+        scope: 'scope-audits',
+        prompt: 'Find the roadmap note',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, search.invocationId);
+        return row?.status === 'succeeded';
+      });
+      const searchRow = await getInvocationRowById(
+        handle.db,
+        search.invocationId,
+      );
+      const searchAudits = await auditsFor(search.invocationId);
+      expect(searchAudits).toHaveLength(1);
+      expect(searchAudits[0]).toMatchObject({
+        tool_name: 'notes__search',
+        status: 'succeeded',
+        scope: 'scope-audits',
+        error_code: null,
+        request_snapshot: { query: 'roadmap' },
+      });
+      expect(searchAudits[0]?.idempotency_key).toMatch(/^[0-9a-f]{64}$/);
+      expect(searchAudits[0]?.run_id).toBe(searchRow?.activeRunId);
+      expect(searchAudits[0]?.completed_at).not.toBeNull();
+
+      const refund = await runtime.enqueue({
+        scope: 'scope-audits',
+        prompt: 'Refund order 42: 5000 cents, duplicate charge.',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, refund.invocationId);
+        return row?.status === 'awaiting_approval';
+      });
+      expect(await auditsFor(refund.invocationId)).toEqual([]);
+      expect(executed.refund).toBe(0);
+
+      await runtime.approveInvocation(refund.invocationId);
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, refund.invocationId);
+        return row?.status === 'succeeded';
+      });
+      const refundAudits = await auditsFor(refund.invocationId);
+      expect(refundAudits).toHaveLength(1);
+      expect(refundAudits[0]).toMatchObject({
+        tool_name: 'billing__refund',
+        status: 'succeeded',
+        request_snapshot: { amountCents: 5000, reason: 'duplicate charge' },
+      });
+      expect(executed.refund).toBe(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('reclaims the same audit row when a failed call is retried', async () => {
+    const { runtime, worker, executed, failNextSearch } = setup();
+    try {
+      failNextSearch();
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-audits-retry',
+        prompt: 'Find the roadmap note',
+        maxAttempts: 2,
+      });
+      await waitFor(async () => {
+        const audits = await auditsFor(invocationId);
+        return audits.length === 1 && audits[0]?.status === 'failed';
+      });
+      const failed = (await auditsFor(invocationId))[0];
+      expect(failed?.error_code).toBe('tool_call_failed');
+      expect(failed?.completed_at).not.toBeNull();
+      expect(executed.search).toBe(0);
+
+      await handle.pool.query(
+        `update agent_runtime.invocations set next_attempt_at = now() where id = $1`,
+        [invocationId],
+      );
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, invocationId);
+        return row?.status === 'succeeded';
+      });
+      const audits = await auditsFor(invocationId);
+      expect(audits).toHaveLength(1);
+      expect(audits[0]?.id).toBe(failed?.id);
+      expect(audits[0]?.idempotency_key).toBe(failed?.idempotency_key);
+      expect(audits[0]?.run_id).not.toBe(failed?.run_id);
+      expect(audits[0]).toMatchObject({
+        status: 'succeeded',
+        error_code: null,
+      });
+      expect(executed.search).toBe(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('blocks execution when audit rows cannot be written', async () => {
+    const { runtime, worker, executed } = setup();
+    await handle.pool.query(`
+      create or replace function agent_runtime.reject_tool_call_audits()
+      returns trigger language plpgsql as $$
+      begin
+        raise exception 'tool_call_audits unavailable';
+      end;
+      $$;
+      create trigger reject_tool_call_audits_trigger
+        before insert on agent_runtime.tool_call_audits
+        for each row execute function agent_runtime.reject_tool_call_audits();
+    `);
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-audits-blocked',
+        prompt: 'Find the roadmap note',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, invocationId);
+        return row?.status === 'failed';
+      });
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row?.lastErrorCode).toBe('audit_persistence_failed');
+      expect(executed.search).toBe(0);
+      expect(await auditsFor(invocationId)).toEqual([]);
+    } finally {
+      await handle.pool.query(`
+        drop trigger if exists reject_tool_call_audits_trigger
+          on agent_runtime.tool_call_audits;
+        drop function if exists agent_runtime.reject_tool_call_audits();
+      `);
+      await worker.stop();
+    }
+  });
+});

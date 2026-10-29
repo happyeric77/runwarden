@@ -50,8 +50,11 @@ per-call audit), with durable execution as the substrate underneath.
   through the library API. Approval reruns the whole invocation and
   only the exact approved call passes; rejection cancels it. Nothing
   sensitive executes unapproved.
-- **Audit trail in Postgres**: every invocation and every policy decision
-  is a row in the `agent_runtime` schema, queryable with plain SQL.
+- **Audit trail in Postgres**: every invocation, every policy decision,
+  and every executed tool call is a row in the `agent_runtime` schema,
+  queryable with plain SQL. Each executed call carries a deterministic
+  idempotency key, also sent to the tool server, so a rerun can dedupe
+  its side effects.
 - **Durable execution**: invocations are claimed by workers under leases
   with heartbeats, retried with backoff, and fenced so a stale worker
   cannot overwrite a newer attempt. Delivery is at-least-once; idempotency
@@ -105,8 +108,9 @@ real model provider), see [examples/durable](examples/durable/README.md).
 4. At every model step, the proposed tool calls are checked against
    policy (exactly-one, allowlist, input validation, `requireApproval`)
    before anything executes through MCP.
-5. Every ruling lands in `policy_decisions` and the invocation's state in
-   `invocations`, so the whole run can be reconstructed from SQL.
+5. Every ruling lands in `policy_decisions`, every executed call lands
+   in `tool_call_audits`, and the invocation's state in `invocations`,
+   so the whole run can be reconstructed from SQL.
 6. If a proposed call is listed in `requireApproval`, the invocation
    parks in `awaiting_approval` instead of failing. Your app resolves it
    with `approveInvocation` or `rejectInvocation`. Approval reruns the
@@ -196,6 +200,8 @@ The end of a quickstart run prints that trail. A typical run:
   policy_decision invocation=<id> rule=require_approval decision=approval_requested tool=billing__refund
   policy_decision invocation=<id> rule=require_approval decision=approved tool=billing__refund
   policy_decision invocation=<id> rule=require_approval decision=allow tool=billing__refund
+  tool_call_audit invocation=<id> tool=notes__search status=succeeded idempotency_key=<prefix>...
+  tool_call_audit invocation=<id> tool=billing__refund status=succeeded idempotency_key=<prefix>...
 ```
 
 ## Limitations
@@ -215,9 +221,10 @@ The end of a quickstart run prints that trail. A typical run:
   reruns from the start, earlier tool calls can execute again, and
   idempotency keys guard their side effects. That cost is the price of
   invocation-level durability in v1.
-- **Audit scope today:** invocations and policy decisions are recorded.
-  The `tool_call_audits` table ships ahead of its writer, which lands in a
-  later slice.
+- **Audit scope today:** invocations, policy decisions, and executed
+  tool calls are recorded. A call that policy denies is never dispatched,
+  so it appears in `policy_decisions` only, with no `tool_call_audits`
+  row.
 - **Not hosted, not enterprise-grade:** a library you run yourself.
   Isolation between your own workloads is a single `scope` string, not a
   multi-tenant control plane.

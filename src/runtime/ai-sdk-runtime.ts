@@ -23,7 +23,10 @@ import type {
   RuntimeInvocationInput,
   RuntimeMetrics,
   SystemPromptLoader,
+  ToolCallAuditEvent,
+  ToolCallAuditSink,
 } from '../contracts/runtime';
+import { deriveToolCallIdempotencyKey } from './canonical-json';
 import { PolicyEngine, type ParsedToolCall } from './policy-engine';
 
 const TOOL_EXECUTION_CONTRACT = [
@@ -44,6 +47,7 @@ interface AiSdkNativeRuntimeOptions {
   now?: () => number;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  onToolCallAudit?: ToolCallAuditSink;
 }
 
 interface InvocationState {
@@ -77,6 +81,12 @@ function aggregateStepTimings(
       steps.flatMap((step) => Object.values(step.performance.toolExecutionMs)),
     ),
   };
+}
+
+function auditErrorCode(error: AgentRuntimeError): string {
+  const code = error.diagnostics.code;
+  if (typeof code === 'string') return code;
+  return error.kind === 'timeout' ? 'tool_call_timeout' : 'tool_call_failed';
 }
 
 function normalizeProviderName(provider: string): string {
@@ -321,7 +331,34 @@ export class AiSdkNativeRuntime implements AgentRuntime {
           tool({
             description: definition.description,
             inputSchema: definition.inputSchema,
-            execute: async (arguments_) => {
+            execute: async (arguments_, options) => {
+              const audit = {
+                scope: input.scope,
+                invocationId: input.invocationId,
+                runId: input.runId,
+                toolName: name,
+                toolCallId: options.toolCallId,
+                idempotencyKey: deriveToolCallIdempotencyKey(
+                  input.invocationId,
+                  name,
+                  arguments_,
+                ),
+                input: arguments_,
+              };
+              // An unaudited call must not dispatch. Audit failures go
+              // through policy.fail like MCP failures: the SDK turns a
+              // thrown tool error into a model-visible result, so only a
+              // terminal error stops the invocation.
+              try {
+                await this.emitToolCallAudit({ ...audit, phase: 'started' });
+              } catch (error) {
+                policy.fail(
+                  findAgentRuntimeError(error) ??
+                    new AgentRuntimeError('failure', 'Tool call audit failed'),
+                );
+                throw error;
+              }
+              let result: string;
               try {
                 state.session ??= this.options.mcpClient!.open({
                   runId: input.runId,
@@ -329,24 +366,59 @@ export class AiSdkNativeRuntime implements AgentRuntime {
                 });
                 const session = await state.session;
                 state.toolCallCount += 1;
-                return await session.callTool({
+                result = await session.callTool({
                   name,
                   arguments: arguments_ as Record<string, unknown>,
                   timeoutMs: this.remaining(startedAt),
+                  idempotencyKey: audit.idempotencyKey,
                 });
               } catch (error) {
+                const agentError =
+                  findAgentRuntimeError(error) ??
+                  new AgentRuntimeError('failure', 'MCP tool call failed');
                 // Hard MCP failures must not give the model another turn.
+                policy.fail(agentError);
+                try {
+                  await this.emitToolCallAudit({
+                    ...audit,
+                    phase: 'failed',
+                    errorCode: auditErrorCode(agentError),
+                  });
+                } catch (auditError) {
+                  policy.fail(findAgentRuntimeError(auditError) ?? agentError);
+                  throw auditError;
+                }
+                throw error;
+              }
+              try {
+                await this.emitToolCallAudit({ ...audit, phase: 'succeeded' });
+              } catch (error) {
                 policy.fail(
                   findAgentRuntimeError(error) ??
-                    new AgentRuntimeError('failure', 'MCP tool call failed'),
+                    new AgentRuntimeError('failure', 'Tool call audit failed'),
                 );
                 throw error;
               }
+              return result;
             },
           }),
         ];
       }),
     ) as ToolSet;
+  }
+
+  private async emitToolCallAudit(event: ToolCallAuditEvent): Promise<void> {
+    if (!this.options.onToolCallAudit) return;
+    try {
+      await this.options.onToolCallAudit(event);
+    } catch (error) {
+      throw new AgentRuntimeError(
+        'failure',
+        'Tool call audit persistence failed',
+        { code: 'audit_persistence_failed' },
+        { cause: error },
+      );
+    }
   }
 
   private correctionFor(call: ParsedToolCall): string | undefined {

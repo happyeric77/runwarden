@@ -1,6 +1,7 @@
 import { AgentRuntimeError } from '../contracts/errors';
 import type { PolicyDecision, RuntimePolicies } from '../contracts/policy';
 import type { PendingToolCall } from '../contracts/runtime';
+import { canonicalJson } from './canonical-json';
 
 const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';
@@ -24,21 +25,6 @@ interface PolicyEngineHooks {
   onDecision?: (decision: PolicyRuling) => void;
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
   approvedToolCall?: PendingToolCall;
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-  }
-  if (typeof value === 'object' && value !== null) {
-    const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
-    );
-    return `{${entries
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'undefined';
 }
 
 function isSameToolCall(

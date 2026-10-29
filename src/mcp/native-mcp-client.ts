@@ -1,7 +1,12 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-import { ERROR_CATEGORY_META_KEY, RUN_ID_HEADER, RUNTIME_NAME } from '../brand';
+import {
+  ERROR_CATEGORY_META_KEY,
+  IDEMPOTENCY_KEY_META_KEY,
+  RUN_ID_HEADER,
+  RUNTIME_NAME,
+} from '../brand';
 import { AgentRuntimeError } from '../contracts/errors';
 import type { McpToolClient, McpToolSession } from '../contracts/runtime';
 
@@ -83,7 +88,17 @@ export class NativeMcpClient implements McpToolClient {
       callTool: async (call) => {
         try {
           const result = await client.callTool(
-            { name: call.name, arguments: call.arguments },
+            {
+              name: call.name,
+              arguments: call.arguments,
+              ...(call.idempotencyKey
+                ? {
+                    _meta: {
+                      [IDEMPOTENCY_KEY_META_KEY]: call.idempotencyKey,
+                    },
+                  }
+                : {}),
+            },
             undefined,
             { timeout: Math.min(this.timeoutMs, call.timeoutMs) },
           );
