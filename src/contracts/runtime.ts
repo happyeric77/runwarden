@@ -72,9 +72,26 @@ export interface McpToolSession {
     name: string;
     arguments: Record<string, unknown>;
     timeoutMs: number;
+    idempotencyKey?: string;
   }): Promise<string>;
   close(): Promise<void>;
 }
+
+export interface ToolCallAuditEvent {
+  phase: 'started' | 'succeeded' | 'failed';
+  scope: string;
+  invocationId: string;
+  runId: string;
+  toolName: string;
+  toolCallId?: string;
+  idempotencyKey: string;
+  input: unknown;
+  errorCode?: string;
+}
+
+export type ToolCallAuditSink = (
+  event: ToolCallAuditEvent,
+) => Promise<void> | void;
 
 export interface McpToolClient {
   open(input: { runId: string; timeoutMs: number }): Promise<McpToolSession>;

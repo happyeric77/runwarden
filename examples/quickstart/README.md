@@ -53,14 +53,17 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
    The script prints that response without claiming the refund executed. Changed
    arguments require a new approval; the script leaves that request pending
    rather than auto-approving it again.
-3. **The audit trail.** The script queries `agent_runtime.invocations`
-   and `agent_runtime.policy_decisions` and prints both: statuses,
-   attempt counts, and the ruling behind every step above.
+3. **The audit trail.** The script queries `agent_runtime.invocations`,
+   `agent_runtime.policy_decisions`, and `agent_runtime.tool_call_audits`
+   and prints all three: statuses, attempt counts, the ruling behind
+   every step above, and one row per executed call with the prefix of
+   its idempotency key. The denied refund proposal has no tool call
+   audit row: it was never dispatched.
 
 The model's wording and whether it proposes a tool call vary from run to run.
 Whenever it proposes `billing__refund`, the runtime gates that call; the final
-summary follows the recorded evidence. Both invocation rows and their policy
-decisions are printed even if the refund rerun fails or parks again. An `allow`
+summary follows the recorded evidence. The invocation rows, policy
+decisions, and tool call audits are printed even if the refund rerun fails or parks again. An `allow`
 ruling proves policy authorization, not the tool's side effect.
 
 ## What just happened, in library terms

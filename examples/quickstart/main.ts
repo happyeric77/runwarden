@@ -181,6 +181,13 @@ try {
         where invocation_id = any($1) order by id`,
       [ids],
     );
+    const toolAudits = await db.pool.query(
+      `select invocation_id, tool_name, status,
+              left(idempotency_key, 12) as key_prefix
+         from agent_runtime.tool_call_audits
+        where invocation_id = any($1) order by id`,
+      [ids],
+    );
     console.log('\n[audit] what landed in Postgres:');
     for (const row of invocations.rows) {
       console.log(
@@ -192,6 +199,12 @@ try {
       console.log(
         `  policy_decision invocation=${row.invocation_id} rule=${row.rule} ` +
           `decision=${row.decision}${row.tool_name ? ` tool=${row.tool_name}` : ''}`,
+      );
+    }
+    for (const row of toolAudits.rows) {
+      console.log(
+        `  tool_call_audit invocation=${row.invocation_id} tool=${row.tool_name} ` +
+          `status=${row.status} idempotency_key=${row.key_prefix}...`,
       );
     }
     const refundDecisions = decisions.rows.filter(
