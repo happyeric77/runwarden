@@ -45,20 +45,23 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
    as `approval_requested`. The script then plays the host app: it lists
    the pending approval with `listPendingApprovals`, approves it with
    `approveInvocation`, and the worker reruns the invocation from the
-   start. This time the exact approved call passes the gate, the refund
-   executes, and the invocation succeeds. Approval reruns the whole
+   start. If the model proposes the exact approved call, it passes the approval
+   gate, subject to the other policies, including the tool-call budget. Approval reruns the whole
    invocation, so tool calls from earlier in the run can execute again;
    idempotency keys are what guard their side effects. Occasionally the
-   model responds with text instead of proposing a tool call. In that
-   case, the script prints its response and reports that nothing was
-   intercepted, rather than claiming the gate blocked a call.
+   model responds with text instead of proposing a tool call, even after approval.
+   The script prints that response without claiming the refund executed. Changed
+   arguments require a new approval; the script leaves that request pending
+   rather than auto-approving it again.
 3. **The audit trail.** The script queries `agent_runtime.invocations`
    and `agent_runtime.policy_decisions` and prints both: statuses,
    attempt counts, and the ruling behind every step above.
 
 The model's wording and whether it proposes a tool call vary from run to run.
 Whenever it proposes `billing__refund`, the runtime gates that call; the final
-summary follows the recorded evidence, and both invocations are always audited.
+summary follows the recorded evidence. Both invocation rows and their policy
+decisions are printed even if the refund rerun fails or parks again. An `allow`
+ruling proves policy authorization, not the tool's side effect.
 
 ## What just happened, in library terms
 
@@ -71,6 +74,9 @@ summary follows the recorded evidence, and both invocations are always audited.
   only to keep the quickstart to one command; in production it is its
   own process (see the [durable example](../durable/README.md), which
   splits app and worker into separate processes).
+- `invoke()` and `waitForInvocation()` surface `approval_required` as soon as
+  the invocation parks. Approval does not guarantee the model will propose the
+  same call on its rerun; changed arguments need another approval.
 - Policy is enforced on the execution path by the runtime, not by asking
   the model nicely: a proposed gated tool call is stopped before the MCP
   server ever sees it.

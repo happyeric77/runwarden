@@ -10,13 +10,14 @@ export async function listAwaitingApprovalRows(
   db: Database,
   scope?: string,
 ): Promise<InvocationRow[]> {
-  const result = scope
-    ? await db.execute(sql`
+  const result =
+    scope !== undefined
+      ? await db.execute(sql`
         select * from agent_runtime.invocations
         where status = 'awaiting_approval' and scope = ${scope}
         order by created_at asc, id asc
       `)
-    : await db.execute(sql`
+      : await db.execute(sql`
         select * from agent_runtime.invocations
         where status = 'awaiting_approval'
         order by created_at asc, id asc

@@ -157,22 +157,13 @@ export class PolicyEngine {
       };
     }
 
-    if (this.policies.requireApproval?.includes(input.toolName)) {
-      if (
-        this.approvedToolCall &&
-        isSameToolCall(this.approvedToolCall, input.toolName, input.toolInput)
-      ) {
-        // A grant covers the exact approved call, and only once.
-        this.approvedToolCall = undefined;
-        this.approvedToolCalls += 1;
-        this.record({
-          rule: 'require_approval',
-          decision: 'allow',
-          toolName: input.toolName,
-          detail: { viaApproval: true },
-        });
-        return 'not-applicable';
-      }
+    const requiresApproval = this.policies.requireApproval?.includes(
+      input.toolName,
+    );
+    const matchesApproval =
+      this.approvedToolCall !== undefined &&
+      isSameToolCall(this.approvedToolCall, input.toolName, input.toolInput);
+    if (requiresApproval && !matchesApproval) {
       this.pendingApproval ??= {
         toolName: input.toolName,
         input: input.toolInput,
@@ -212,6 +203,16 @@ export class PolicyEngine {
       return { type: 'denied', reason: 'Tool-call budget exhausted.' };
     }
 
+    // A grant waives approval, not the invocation's other policies.
+    if (requiresApproval && matchesApproval) {
+      this.approvedToolCall = undefined;
+      this.record({
+        rule: 'require_approval',
+        decision: 'allow',
+        toolName: input.toolName,
+        detail: { viaApproval: true },
+      });
+    }
     // Reserve synchronously: the SDK approves parallel calls before executing them.
     this.approvedToolCalls += 1;
     return 'not-applicable';
