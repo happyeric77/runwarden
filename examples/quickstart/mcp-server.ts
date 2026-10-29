@@ -19,7 +19,12 @@ function buildServer(): McpServer {
       inputSchema: { query: z.string() },
     },
     async ({ query }) => {
-      const match = NOTES[query.trim().toLowerCase()];
+      const q = query.trim().toLowerCase();
+      const match =
+        NOTES[q] ??
+        Object.entries(NOTES).find(
+          ([key, text]) => q.includes(key) || text.toLowerCase().includes(q),
+        )?.[1];
       return {
         content: [
           { type: 'text' as const, text: match ?? 'No matching note.' },
