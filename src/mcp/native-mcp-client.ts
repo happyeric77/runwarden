@@ -1,12 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-import {
-  ERROR_CATEGORY_META_KEY,
-  LEGACY_ERROR_CATEGORY_META_KEYS,
-  RUN_ID_HEADER,
-  RUNTIME_NAME,
-} from '../brand';
+import { ERROR_CATEGORY_META_KEY, RUN_ID_HEADER, RUNTIME_NAME } from '../brand';
 import { AgentRuntimeError } from '../contracts/errors';
 import type { McpToolClient, McpToolSession } from '../contracts/runtime';
 
@@ -32,12 +27,7 @@ function required(value: string, name: string): string {
 }
 
 function isCorrectable(meta: Record<string, unknown> | undefined): boolean {
-  if (!meta) return false;
-  if (meta[ERROR_CATEGORY_META_KEY] === 'correctable') return true;
-  // Existing tool servers still send the pre-extraction meta key.
-  return LEGACY_ERROR_CATEGORY_META_KEYS.some(
-    (key) => meta[key] === 'correctable',
-  );
+  return meta?.[ERROR_CATEGORY_META_KEY] === 'correctable';
 }
 
 export class NativeMcpClient implements McpToolClient {

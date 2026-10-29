@@ -4,8 +4,3 @@ export const RUNTIME_NAME = 'runwarden';
 export const RUN_ID_HEADER = 'X-Runwarden-Run-Id';
 
 export const ERROR_CATEGORY_META_KEY = 'runwarden/error-category';
-
-// Existing tool servers still send the pre-extraction meta key.
-export const LEGACY_ERROR_CATEGORY_META_KEYS: readonly string[] = [
-  'smb-ops/error-category',
-];

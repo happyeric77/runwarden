@@ -102,34 +102,6 @@ describe('NativeMcpClient', () => {
     await session.close();
   });
 
-  it('accepts the legacy pre-extraction correctable meta key', async () => {
-    const { endpoint } = await startServer((server) => {
-      server.registerTool(
-        'validate',
-        { inputSchema: { value: z.string() } },
-        async () => ({
-          isError: true,
-          _meta: { 'smb-ops/error-category': 'correctable' },
-          content: [{ type: 'text', text: 'Legacy correction hint.' }],
-        }),
-      );
-    });
-    const client = new NativeMcpClient({ endpoint });
-    const session = await client.open({
-      runId: 'run-legacy',
-      timeoutMs: 5_000,
-    });
-
-    await expect(
-      session.callTool({
-        name: 'validate',
-        arguments: { value: 'bad' },
-        timeoutMs: 5_000,
-      }),
-    ).resolves.toContain('Legacy correction hint.');
-    await session.close();
-  });
-
   it('fails non-correctable MCP application errors', async () => {
     const { endpoint } = await startServer((server) => {
       server.registerTool(
