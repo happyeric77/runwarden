@@ -12,7 +12,7 @@ server in this directory (`notes__search`, `billing__refund`).
 
 ## Run it
 
-From the repository root, with Node.js 24+, pnpm, and Docker Compose:
+From the repository root, with Node.js 22+, pnpm, and Docker Compose:
 
 ```sh
 pnpm install --frozen-lockfile

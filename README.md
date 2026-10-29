@@ -103,6 +103,8 @@ The end of a quickstart run prints exactly that:
   invocation <id>: status=succeeded attempts=1
   invocation <id>: status=failed attempts=1 error=approval_required
   policy_decision invocation=<id> rule=exactly_one decision=deny tool=notes__search
+  policy_decision invocation=<id> rule=exactly_one decision=deny tool=notes__search
+  policy_decision invocation=<id> rule=exactly_one decision=correction_issued
   policy_decision invocation=<id> rule=require_approval decision=approval_requested tool=billing__refund
 ```
 
