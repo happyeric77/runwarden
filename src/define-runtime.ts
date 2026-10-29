@@ -19,6 +19,8 @@ import type {
   McpToolSession,
   RuntimeMetrics,
   SystemPromptLoader,
+  ToolCallAuditEvent,
+  ToolCallAuditSink,
 } from './contracts/runtime';
 import type { DatabaseHandle } from './db/client';
 import {
@@ -46,6 +48,9 @@ export const RUNTIME_INTERNALS: unique symbol = Symbol('runwarden/internals');
 
 export interface RuntimeInternals {
   onPolicyDecision(listener: (decision: PolicyDecision) => void): () => void;
+  onToolCallAudit?: (
+    listener: (event: ToolCallAuditEvent) => Promise<void>,
+  ) => () => void;
 }
 
 export interface DefineRuntimeOptions {
@@ -60,6 +65,7 @@ export interface DefineRuntimeOptions {
   policies?: RuntimePolicies;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  onToolCallAudit?: ToolCallAuditSink;
 }
 
 export interface InvokeOptions {
@@ -168,6 +174,9 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     options.mcpClient ?? buildMcpClient(options.mcpServers, options.policies);
 
   const decisionListeners = new Set<(decision: PolicyDecision) => void>();
+  const auditListeners = new Set<
+    (event: ToolCallAuditEvent) => Promise<void>
+  >();
   const engine = new AiSdkNativeRuntime({
     model,
     tools: options.tools,
@@ -179,6 +188,15 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     onPolicyDecision: (decision) => {
       for (const listener of decisionListeners) listener(decision);
       options.onPolicyDecision?.(decision);
+    },
+    onToolCallAudit: async (event) => {
+      // Persistence listeners run first; their failure fails the call.
+      for (const listener of auditListeners) await listener(event);
+      try {
+        await options.onToolCallAudit?.(event);
+      } catch {
+        // Observers must not affect the invocation.
+      }
     },
   });
 
@@ -306,6 +324,12 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
         decisionListeners.add(listener);
         return () => {
           decisionListeners.delete(listener);
+        };
+      },
+      onToolCallAudit: (listener) => {
+        auditListeners.add(listener);
+        return () => {
+          auditListeners.delete(listener);
         };
       },
     },

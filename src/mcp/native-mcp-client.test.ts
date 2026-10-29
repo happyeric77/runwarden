@@ -9,7 +9,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { RUN_ID_HEADER } from '../brand';
+import { IDEMPOTENCY_KEY_META_KEY, RUN_ID_HEADER } from '../brand';
 import { NativeMcpClient } from './native-mcp-client';
 
 const closers: Array<() => Promise<void>> = [];
@@ -99,6 +99,38 @@ describe('NativeMcpClient', () => {
         timeoutMs: 5_000,
       }),
     ).resolves.toContain('Try a corrected value.');
+    await session.close();
+  });
+
+  it('sends the call idempotency key as request meta when provided', async () => {
+    let seenMeta: Record<string, unknown> | undefined;
+    const { endpoint } = await startServer((server) => {
+      server.registerTool(
+        'ping',
+        { inputSchema: { value: z.string() } },
+        async ({ value }, extra) => {
+          seenMeta = extra._meta as Record<string, unknown> | undefined;
+          return { content: [{ type: 'text', text: `pong:${value}` }] };
+        },
+      );
+    });
+    const client = new NativeMcpClient({ endpoint });
+    const session = await client.open({ runId: 'run-123', timeoutMs: 5_000 });
+
+    await session.callTool({
+      name: 'ping',
+      arguments: { value: 'hello' },
+      timeoutMs: 5_000,
+      idempotencyKey: 'key-abc',
+    });
+    expect(seenMeta?.[IDEMPOTENCY_KEY_META_KEY]).toBe('key-abc');
+
+    await session.callTool({
+      name: 'ping',
+      arguments: { value: 'again' },
+      timeoutMs: 5_000,
+    });
+    expect(seenMeta?.[IDEMPOTENCY_KEY_META_KEY]).toBeUndefined();
     await session.close();
   });
 

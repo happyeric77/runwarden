@@ -17,6 +17,10 @@ import {
   releaseWorkerLease,
   tryAcquireWorkerLease,
 } from './repositories/leases';
+import {
+  claimToolCallAudit,
+  completeToolCallAudit,
+} from './repositories/tool-call-audits';
 import { startTestPostgres, type TestPostgres } from './test-postgres';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,6 +68,119 @@ describe('invocation repositories', () => {
     });
     expect(noKeyA.invocationId).not.toBe(noKeyB.invocationId);
   });
+
+  it.each([false, true])(
+    'fences reclaimed audit completions, same run: %s',
+    async (sameRun) => {
+      const { invocationId } = await enqueueInvocation(handle.db, {
+        scope: 'audit-fence',
+        prompt: 'audit',
+      });
+      const runId = '00000000-0000-4000-8000-000000000001';
+      const claim = {
+        invocationId,
+        scope: 'audit-fence',
+        runId,
+        toolName: 'test',
+        idempotencyKey: invocationId,
+        requestSnapshot: { a: 1 },
+        metadata: { toolCallId: 'first' },
+        dispatchId: 'first',
+      };
+      const id = await claimToolCallAudit(handle.db, claim);
+      expect(
+        await completeToolCallAudit(
+          handle.db,
+          id,
+          'failed',
+          'old-error',
+          runId,
+          'first',
+        ),
+      ).toBe(true);
+      const nextRun = sameRun ? runId : '00000000-0000-4000-8000-000000000002';
+      expect(
+        await claimToolCallAudit(handle.db, {
+          ...claim,
+          runId: nextRun,
+          dispatchId: 'second',
+          metadata: { toolCallId: 'second' },
+        }),
+      ).toBe(id);
+      const reclaimed = await handle.pool.query(
+        'select status, completed_at, error_code, metadata from agent_runtime.tool_call_audits where id=$1',
+        [id],
+      );
+      expect(reclaimed.rows[0]).toMatchObject({
+        status: 'started',
+        completed_at: null,
+        error_code: null,
+        metadata: { toolCallId: 'second' },
+      });
+      expect(
+        await completeToolCallAudit(
+          handle.db,
+          id,
+          'failed',
+          'stale',
+          runId,
+          'first',
+        ),
+      ).toBe(false);
+      expect(
+        await completeToolCallAudit(
+          handle.db,
+          id,
+          'succeeded',
+          undefined,
+          nextRun,
+          'second',
+        ),
+      ).toBe(true);
+      expect(
+        await completeToolCallAudit(
+          handle.db,
+          id,
+          'failed',
+          'duplicate',
+          nextRun,
+          'second',
+        ),
+      ).toBe(false);
+      expect(
+        (
+          await handle.pool.query(
+            'select status, error_code, run_id from agent_runtime.tool_call_audits where id=$1',
+            [id],
+          )
+        ).rows[0],
+      ).toEqual({ status: 'succeeded', error_code: null, run_id: nextRun });
+      await claimToolCallAudit(handle.db, {
+        ...claim,
+        runId: nextRun,
+        dispatchId: 'third',
+        metadata: { toolCallId: 'third' },
+      });
+      expect(
+        (
+          await handle.pool.query(
+            'select status, completed_at, error_code, request_snapshot, metadata from agent_runtime.tool_call_audits where id=$1',
+            [id],
+          )
+        ).rows[0],
+      ).toEqual({
+        status: 'started',
+        completed_at: null,
+        error_code: null,
+        request_snapshot: { a: 1 },
+        metadata: { toolCallId: 'third', dispatchId: 'third' },
+      });
+      await handle.pool.query(
+        "update agent_runtime.invocations set status='cancelled' where id=$1",
+        [invocationId],
+      );
+    },
+  );
 
   it('serializes same-ordering-key invocations at claim time', async () => {
     const a1 = await enqueueInvocation(handle.db, {
