@@ -2,6 +2,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { AgentRuntimeError } from '../contracts/errors';
 import type { PolicyDecision } from '../contracts/policy';
 import type { McpToolClient } from '../contracts/runtime';
 import { createDb, type DatabaseHandle } from '../db/client';
@@ -313,61 +314,69 @@ describe('runWorker', () => {
     }
   });
 
-  it('fails the invocation instead of silently losing an audit write', async () => {
-    await handle.pool.query(
-      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
-    );
-    await handle.pool.query(
-      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
-    );
-    let listener: ((decision: PolicyDecision) => void) | undefined;
-    const { invocationId } = await enqueueInvocation(handle.db, {
-      scope: 'scope-audit-error',
-      prompt: 'audit',
-      maxAttempts: 1,
-    });
-    const worker = runWorker({
-      db: handle,
-      pollIdleMs: 10,
-      pollActiveMs: 10,
-      runtime: {
-        [RUNTIME_INTERNALS]: {
-          onPolicyDecision(callback) {
-            listener = callback;
-            return () => {
-              listener = undefined;
-            };
-          },
-        },
-        engine: {
-          async invoke(input) {
-            listener?.({ ...input, rule: 'allowlist', decision: 'deny' });
-            return {
-              invocationId: input.invocationId,
-              runId: input.runId,
-              text: 'not committed',
-            };
-          },
-        },
-      },
-    });
-    try {
-      await waitFor(
-        async () =>
-          (await getInvocationRowById(handle.db, invocationId))?.status ===
-          'failed',
-      );
-      const row = await getInvocationRowById(handle.db, invocationId);
-      expect(row?.lastErrorCode).toBe('audit_persistence_failed');
-      expect(row?.resultText).toBeNull();
-    } finally {
-      await worker.stop();
+  it.each([false, true])(
+    'audit failure wins over completion or approval parking: %s',
+    async (approval) => {
       await handle.pool.query(
-        'drop trigger reject_audit on agent_runtime.policy_decisions',
+        `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
       );
-      await handle.pool.query('drop function agent_runtime.reject_audit()');
-    }
-  });
+      await handle.pool.query(
+        'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+      );
+      let listener: ((decision: PolicyDecision) => void) | undefined;
+      const { invocationId } = await enqueueInvocation(handle.db, {
+        scope: 'scope-audit-error',
+        prompt: 'audit',
+        maxAttempts: 1,
+      });
+      const worker = runWorker({
+        db: handle,
+        pollIdleMs: 10,
+        pollActiveMs: 10,
+        runtime: {
+          [RUNTIME_INTERNALS]: {
+            onPolicyDecision(callback) {
+              listener = callback;
+              return () => {
+                listener = undefined;
+              };
+            },
+          },
+          engine: {
+            async invoke(input) {
+              listener?.({ ...input, rule: 'allowlist', decision: 'deny' });
+              if (approval)
+                throw new AgentRuntimeError('failure', 'Approval required', {
+                  code: 'approval_required',
+                  pendingToolCall: { toolName: 'gated', input: {} },
+                });
+              return {
+                invocationId: input.invocationId,
+                runId: input.runId,
+                text: 'not committed',
+              };
+            },
+          },
+        },
+      });
+      try {
+        await waitFor(
+          async () =>
+            (await getInvocationRowById(handle.db, invocationId))?.status ===
+            'failed',
+        );
+        const row = await getInvocationRowById(handle.db, invocationId);
+        expect(row?.lastErrorCode).toBe('audit_persistence_failed');
+        expect(row?.resultText).toBeNull();
+      } finally {
+        await worker.stop();
+        await handle.pool.query(
+          'drop trigger reject_audit on agent_runtime.policy_decisions',
+        );
+        await handle.pool.query('drop function agent_runtime.reject_audit()');
+      }
+    },
+  );
 
   it('discards a late result after heartbeat reports lost ownership', async () => {
     const { invocationId } = await enqueueInvocation(handle.db, {
@@ -448,7 +457,7 @@ describe('durable defineRuntime', () => {
           async callTool() {
             executedTools++;
             return JSON.stringify([
-              { type: 'text', text: 'Note found: "Roadmap" — ship it.' },
+              { type: 'text', text: 'Note found: "Roadmap": ship it.' },
             ]);
           },
           async close() {},
@@ -567,6 +576,287 @@ describe('durable defineRuntime', () => {
       expect(
         decisions.rows.some((row) => row.decision === 'correction_issued'),
       ).toBe(true);
+    } finally {
+      await worker.stop();
+    }
+  });
+});
+
+describe('approval state machine', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function setup() {
+    let executedTools = 0;
+    let amountCents = 5000;
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool() {
+            executedTools++;
+            return JSON.stringify([
+              { type: 'text', text: 'Refund issued for order 42.' },
+            ]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        });
+        if (promptText.includes('Refund issued')) {
+          return finish([{ type: 'text', text: 'Refund completed.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-refund',
+            toolName: 'billing__refund',
+            input: JSON.stringify({
+              amountCents,
+              reason: 'duplicate charge',
+            }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'billing__refund',
+          description: 'Refund a charge to the original payment method.',
+          inputSchema: z.object({
+            amountCents: z.number().int().positive(),
+            reason: z.string().min(1),
+          }),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are a helpful billing assistant.',
+      loadHistory: async () => [],
+      policies: { requireApproval: ['billing__refund'] },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    return {
+      runtime,
+      worker,
+      executed: () => executedTools,
+      setAmount: (amount: number) => {
+        amountCents = amount;
+      },
+    };
+  }
+
+  async function decisionsFor(invocationId: string) {
+    const result = await handle.pool.query<{ decision: string }>(
+      `select decision from agent_runtime.policy_decisions
+        where invocation_id = $1 and rule = 'require_approval' order by id`,
+      [invocationId],
+    );
+    return result.rows.map((row) => row.decision);
+  }
+
+  it('parks a gated call, then an approval reruns it to completion', async () => {
+    const { runtime, worker, executed } = setup();
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-approval',
+        prompt: 'Refund order 42: 5000 cents, duplicate charge.',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, invocationId);
+        return row?.status === 'awaiting_approval';
+      });
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      expect(parked?.pendingToolCall).toEqual({
+        toolName: 'billing__refund',
+        input: { amountCents: 5000, reason: 'duplicate charge' },
+      });
+      expect(parked?.attemptCount).toBe(0);
+      expect(executed()).toBe(0);
+
+      const pending = await runtime.listPendingApprovals('scope-approval');
+      expect(pending.map((record) => record.id)).toEqual([invocationId]);
+      expect(pending[0]?.pendingToolCall?.toolName).toBe('billing__refund');
+
+      const approved = await runtime.approveInvocation(invocationId, {
+        resolvedBy: 'admin-1',
+      });
+      expect(approved.status).toBe('pending');
+
+      const result = await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Refund completed.');
+      expect(executed()).toBe(1);
+      const done = await getInvocationRowById(handle.db, invocationId);
+      expect(done?.status).toBe('succeeded');
+      expect(done?.attemptCount).toBe(1);
+      expect(done?.pendingToolCall).toBeNull();
+      expect(await decisionsFor(invocationId)).toEqual([
+        'approval_requested',
+        'approved',
+        'allow',
+      ]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('parks changed arguments again without executing or consuming an attempt', async () => {
+    const { runtime, worker, executed, setAmount } = setup();
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'changed-approval',
+        prompt: 'Refund',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      setAmount(6000);
+      await runtime.approveInvocation(invocationId);
+      await expect(
+        runtime.waitForInvocation(invocationId, { pollIntervalMs: 20 }),
+      ).rejects.toMatchObject({ diagnostics: { code: 'approval_required' } });
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      expect(parked?.pendingToolCall).toEqual({
+        toolName: 'billing__refund',
+        input: { amountCents: 6000, reason: 'duplicate charge' },
+      });
+      expect(parked?.attemptCount).toBe(0);
+      expect(executed()).toBe(0);
+      await runtime.approveInvocation(invocationId);
+      await expect(
+        runtime.waitForInvocation(invocationId, { pollIntervalMs: 20 }),
+      ).resolves.toMatchObject({ text: 'Refund completed.' });
+      expect(executed()).toBe(1);
+      expect(await decisionsFor(invocationId)).toEqual([
+        'approval_requested',
+        'approved',
+        'approval_requested',
+        'approved',
+        'allow',
+      ]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('reject cancels the invocation and later resolutions fail', async () => {
+    const { runtime, worker, executed } = setup();
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-approval',
+        prompt: 'Refund order 42: 5000 cents, duplicate charge.',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => {
+        const row = await getInvocationRowById(handle.db, invocationId);
+        return row?.status === 'awaiting_approval';
+      });
+      const rejected = await runtime.rejectInvocation(invocationId, {
+        resolvedBy: 'admin-2',
+        note: 'Already refunded through another channel',
+      });
+      expect(rejected.status).toBe('cancelled');
+      expect(rejected.lastErrorCode).toBe('approval_rejected');
+      expect(executed()).toBe(0);
+      expect(await decisionsFor(invocationId)).toEqual([
+        'approval_requested',
+        'rejected',
+      ]);
+      await expect(
+        runtime.approveInvocation(invocationId),
+      ).rejects.toMatchObject({
+        diagnostics: { code: 'invocation_not_awaiting_approval' },
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('invoke() surfaces approval_required once the invocation parks', async () => {
+    const { runtime, worker } = setup();
+    try {
+      await expect(
+        runtime.invoke(
+          {
+            scope: 'scope-approval',
+            prompt: 'Refund order 42: 5000 cents, duplicate charge.',
+            maxAttempts: 1,
+          },
+          { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+        ),
+      ).rejects.toMatchObject({
+        diagnostics: { code: 'approval_required' },
+      });
+      const pending = await runtime.listPendingApprovals('scope-approval');
+      expect(pending).toHaveLength(1);
+      await runtime.rejectInvocation(pending[0]!.id);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('filters an empty scope without exposing other pending approvals', async () => {
+    const { runtime, worker } = setup();
+    try {
+      const ids: string[] = [];
+      for (const scope of ['', 'other']) {
+        const { invocationId } = await runtime.enqueue({
+          scope,
+          prompt: 'Refund',
+          maxAttempts: 1,
+        });
+        ids.push(invocationId);
+        await waitFor(
+          async () =>
+            (await runtime.getInvocation(invocationId))?.status ===
+            'awaiting_approval',
+        );
+      }
+      expect(
+        (await runtime.listPendingApprovals('')).map((row) => row.id),
+      ).toEqual([ids[0]]);
+      for (const id of ids) await runtime.rejectInvocation(id);
     } finally {
       await worker.stop();
     }

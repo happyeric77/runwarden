@@ -22,8 +22,14 @@ import type {
 } from './contracts/runtime';
 import type { DatabaseHandle } from './db/client';
 import {
+  listAwaitingApprovalRows,
+  resolveInvocationApproval,
+  type ApprovalResolutionOptions,
+} from './db/repositories/approvals';
+import {
   enqueueInvocation,
   getInvocationRowById,
+  toPendingToolCall,
   toRecord,
 } from './db/repositories/invocations';
 import { NativeMcpClient } from './mcp/native-mcp-client';
@@ -61,6 +67,8 @@ export interface InvokeOptions {
   pollIntervalMs?: number;
 }
 
+export type ApprovalActionOptions = ApprovalResolutionOptions;
+
 export interface Runtime {
   invoke(
     input: InvocationInput,
@@ -68,6 +76,19 @@ export interface Runtime {
   ): Promise<InvocationResult>;
   enqueue(input: InvocationInput): Promise<{ invocationId: string }>;
   getInvocation(id: string): Promise<InvocationRecord | undefined>;
+  waitForInvocation(
+    id: string,
+    opts?: InvokeOptions,
+  ): Promise<InvocationResult>;
+  listPendingApprovals(scope?: string): Promise<InvocationRecord[]>;
+  approveInvocation(
+    id: string,
+    opts?: ApprovalActionOptions,
+  ): Promise<InvocationRecord>;
+  rejectInvocation(
+    id: string,
+    opts?: ApprovalActionOptions,
+  ): Promise<InvocationRecord>;
   readonly engine: AgentRuntime;
   readonly [RUNTIME_INTERNALS]?: RuntimeInternals;
 }
@@ -163,16 +184,23 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
 
   const db = options.db;
 
-  async function durableInvoke(
-    input: InvocationInput,
+  async function waitForInvocation(
+    invocationId: string,
     opts?: InvokeOptions,
   ): Promise<InvocationResult> {
-    const { invocationId } = await enqueueInvocation(db!.db, input);
+    if (!db) throw dbRequired('waitForInvocation');
     const deadline = Date.now() + (opts?.waitTimeoutMs ?? 300_000);
     const pollIntervalMs = opts?.pollIntervalMs ?? 250;
     for (;;) {
-      const row = await getInvocationRowById(db!.db, invocationId);
-      if (row?.status === 'succeeded') {
+      const row = await getInvocationRowById(db.db, invocationId);
+      if (!row) {
+        throw new AgentRuntimeError(
+          'failure',
+          `Invocation ${invocationId} was not found`,
+          { code: 'invocation_not_found', invocationId },
+        );
+      }
+      if (row.status === 'succeeded') {
         return {
           invocationId,
           runId: row.activeRunId!,
@@ -181,7 +209,19 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           model: row.model ?? undefined,
         };
       }
-      if (row?.status === 'failed' || row?.status === 'cancelled') {
+      if (row.status === 'awaiting_approval') {
+        const pending = toPendingToolCall(row.pendingToolCall);
+        throw new AgentRuntimeError(
+          'failure',
+          `Invocation ${invocationId} is awaiting approval`,
+          {
+            code: 'approval_required',
+            invocationId,
+            ...(pending ? { toolName: pending.toolName } : {}),
+          },
+        );
+      }
+      if (row.status === 'failed' || row.status === 'cancelled') {
         throw new AgentRuntimeError(
           'failure',
           row.lastErrorMessage ?? `Invocation ${row.status}`,
@@ -203,6 +243,37 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     }
   }
 
+  async function durableInvoke(
+    input: InvocationInput,
+    opts?: InvokeOptions,
+  ): Promise<InvocationResult> {
+    const { invocationId } = await enqueueInvocation(db!.db, input);
+    return waitForInvocation(invocationId, opts);
+  }
+
+  async function resolveApproval(
+    id: string,
+    resolution: 'approved' | 'rejected',
+    opts?: ApprovalActionOptions,
+  ): Promise<InvocationRecord> {
+    if (!db) throw dbRequired(`${resolution} resolution`);
+    const result = await resolveInvocationApproval(db.db, id, resolution, opts);
+    if (result.outcome === 'not_found') {
+      throw new AgentRuntimeError('failure', `Invocation ${id} was not found`, {
+        code: 'invocation_not_found',
+        invocationId: id,
+      });
+    }
+    if (result.outcome === 'not_awaiting') {
+      throw new AgentRuntimeError(
+        'failure',
+        `Invocation ${id} is not awaiting approval`,
+        { code: 'invocation_not_awaiting_approval', invocationId: id },
+      );
+    }
+    return toRecord(result.row);
+  }
+
   return {
     engine,
     invoke: db
@@ -222,6 +293,14 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
       const row = await getInvocationRowById(db.db, id);
       return row ? toRecord(row) : undefined;
     },
+    waitForInvocation,
+    listPendingApprovals: async (scope) => {
+      if (!db) throw dbRequired('listPendingApprovals');
+      const rows = await listAwaitingApprovalRows(db.db, scope);
+      return rows.map(toRecord);
+    },
+    approveInvocation: (id, opts) => resolveApproval(id, 'approved', opts),
+    rejectInvocation: (id, opts) => resolveApproval(id, 'rejected', opts),
     [RUNTIME_INTERNALS]: {
       onPolicyDecision: (listener) => {
         decisionListeners.add(listener);

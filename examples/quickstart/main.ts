@@ -95,6 +95,11 @@ try {
         `[worker] invocation ${invocation.id} failed (${error.message})`,
       );
     },
+    onAwaitingApproval: async (invocation, pendingToolCall) => {
+      console.log(
+        `[worker] invocation ${invocation.id} awaiting approval for ${pendingToolCall.toolName}`,
+      );
+    },
   });
 
   try {
@@ -126,10 +131,42 @@ try {
         throw error;
       }
       refundId = error.diagnostics.invocationId;
-      console.log(
-        `[app] invocation ${refundId} failed: ${error.message} ` +
-          `(code: ${String(error.diagnostics.code)})`,
-      );
+      if (error.diagnostics.code !== 'approval_required') {
+        console.log(
+          `[app] invocation ${refundId} failed: ${error.message} ` +
+            `(code: ${String(error.diagnostics.code)})`,
+        );
+      } else {
+        console.log(
+          `[app] invocation ${refundId} is parked in awaiting_approval: ` +
+            'the refund was proposed and recorded, but not executed.',
+        );
+        const pending = await runtime.listPendingApprovals('demo');
+        const parked = pending.find((record) => record.id === refundId);
+        console.log(
+          `[app] pending approval: ${parked?.pendingToolCall?.toolName} ` +
+            `${JSON.stringify(parked?.pendingToolCall?.input)}`,
+        );
+        await runtime.approveInvocation(refundId, {
+          resolvedBy: 'quickstart',
+        });
+        console.log(
+          `[app] approved invocation ${refundId}; the worker reruns it ` +
+            'from the start, and only the approved call may pass.',
+        );
+        try {
+          const completed = await runtime.waitForInvocation(refundId, {
+            pollIntervalMs: 250,
+          });
+          console.log(`[app] invocation ${refundId}: ${completed.text}`);
+        } catch (error) {
+          if (!(error instanceof AgentRuntimeError)) throw error;
+          console.log(
+            `[app] invocation ${refundId}: ${error.message} ` +
+              `(code: ${String(error.diagnostics.code)}). See the audit below; no further call is auto-approved.`,
+          );
+        }
+      }
     }
 
     const ids = [search.invocationId, refundId];
@@ -166,10 +203,29 @@ try {
           row.rule === 'require_approval' &&
           row.decision === 'approval_requested' &&
           row.tool_name === 'billing__refund',
+      ) &&
+      refundDecisions.some((row) => row.decision === 'approved') &&
+      refundDecisions.some(
+        (row) =>
+          row.rule === 'require_approval' &&
+          row.decision === 'allow' &&
+          row.tool_name === 'billing__refund',
+      ) &&
+      invocations.rows.some(
+        (row) => String(row.id) === refundId && row.status === 'succeeded',
       )
     ) {
       console.log(
-        '\n[done] the gated refund never ran: Postgres recorded approval_requested for billing__refund.',
+        '\n[done] the rerun succeeded and policy allowed the approved refund. Postgres recorded approval_requested, approved, and allow; these rulings alone do not prove a tool side effect.',
+      );
+    } else if (
+      refundDecisions.some((row) => row.decision === 'approved') &&
+      invocations.rows.some(
+        (row) => String(row.id) === refundId && row.status === 'succeeded',
+      )
+    ) {
+      console.log(
+        '\n[done] the rerun succeeded with a model response but did not propose the approved refund. Approval alone does not execute a tool.',
       );
     } else if (
       invocations.rows.some(
@@ -182,7 +238,7 @@ try {
       );
     } else {
       console.log(
-        '\n[done] no refund approval request was recorded. See the invocation outcome and policy decisions above.',
+        '\n[done] the refund did not complete successfully. See its current invocation state and policy decisions above; any new approval request remains pending.',
       );
     }
   } finally {

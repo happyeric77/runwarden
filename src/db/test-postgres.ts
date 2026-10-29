@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -16,7 +17,7 @@ export async function startTestPostgres(): Promise<TestPostgres> {
   const port = 25_000 + Math.floor(Math.random() * 4_000) + counter;
   const databaseName = `dar_test_${counter}`;
   const pg = new EmbeddedPostgres({
-    databaseDir: path.join(tmpdir(), `dar-pg-${port}`),
+    databaseDir: path.join(tmpdir(), `dar-pg-${randomUUID()}`),
     user: 'postgres',
     password: 'password',
     port,

@@ -1,5 +1,6 @@
 import { AgentRuntimeError } from '../contracts/errors';
 import type { PolicyDecision, RuntimePolicies } from '../contracts/policy';
+import type { PendingToolCall } from '../contracts/runtime';
 
 const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';
@@ -22,6 +23,33 @@ type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
 interface PolicyEngineHooks {
   onDecision?: (decision: PolicyRuling) => void;
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
+  approvedToolCall?: PendingToolCall;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function isSameToolCall(
+  approved: PendingToolCall,
+  toolName: string,
+  input: unknown,
+): boolean {
+  return (
+    approved.toolName === toolName &&
+    canonicalJson(approved.input) === canonicalJson(input)
+  );
 }
 
 type ToolApprovalVerdict =
@@ -35,6 +63,8 @@ export class PolicyEngine {
   private pendingCorrection?: PendingCorrection;
   private terminal?: AgentRuntimeError;
   private approvedToolCalls = 0;
+  private approvedToolCall?: PendingToolCall;
+  private pendingApproval?: PendingToolCall;
 
   constructor(
     private readonly policies: RuntimePolicies,
@@ -43,6 +73,7 @@ export class PolicyEngine {
     this.exactlyOne = policies.exactlyOneToolCallPerStep ?? true;
     this.correctionBudget = policies.correctionBudget ?? 1;
     this.maxToolCallsPerInvocation = policies.maxToolCallsPerInvocation ?? 8;
+    this.approvedToolCall = hooks.approvedToolCall;
     for (const [name, value] of [
       ['correctionBudget', this.correctionBudget],
       ['maxToolCallsPerInvocation', this.maxToolCallsPerInvocation],
@@ -62,6 +93,10 @@ export class PolicyEngine {
     return this.terminal;
   }
 
+  get pendingApprovalCall(): PendingToolCall | undefined {
+    return this.pendingApproval;
+  }
+
   fail(error: AgentRuntimeError): void {
     this.terminal ??= error;
   }
@@ -72,6 +107,8 @@ export class PolicyEngine {
 
   approvalFor(input: {
     toolName: string;
+    toolCallId: string;
+    toolInput: unknown;
     proposalCount: number;
     scope: string;
   }): ToolApprovalVerdict {
@@ -120,17 +157,31 @@ export class PolicyEngine {
       };
     }
 
-    if (this.policies.requireApproval?.includes(input.toolName)) {
+    const requiresApproval = this.policies.requireApproval?.includes(
+      input.toolName,
+    );
+    const matchesApproval =
+      this.approvedToolCall !== undefined &&
+      isSameToolCall(this.approvedToolCall, input.toolName, input.toolInput);
+    if (requiresApproval && !matchesApproval) {
+      this.pendingApproval ??= {
+        toolName: input.toolName,
+        input: input.toolInput,
+      };
       this.record({
         rule: 'require_approval',
         decision: 'approval_requested',
         toolName: input.toolName,
+        detail: { toolCallId: input.toolCallId },
       });
-      // Fail closed until the approval state machine can resume work.
       this.terminal ??= new AgentRuntimeError(
         'failure',
         `Tool ${input.toolName} requires approval before execution`,
-        { code: 'approval_required', toolName: input.toolName },
+        {
+          code: 'approval_required',
+          toolName: input.toolName,
+          pendingToolCall: this.pendingApproval,
+        },
       );
       return {
         type: 'denied',
@@ -152,6 +203,16 @@ export class PolicyEngine {
       return { type: 'denied', reason: 'Tool-call budget exhausted.' };
     }
 
+    // A grant waives approval, not the invocation's other policies.
+    if (requiresApproval && matchesApproval) {
+      this.approvedToolCall = undefined;
+      this.record({
+        rule: 'require_approval',
+        decision: 'allow',
+        toolName: input.toolName,
+        detail: { viaApproval: true },
+      });
+    }
     // Reserve synchronously: the SDK approves parallel calls before executing them.
     this.approvedToolCalls += 1;
     return 'not-applicable';

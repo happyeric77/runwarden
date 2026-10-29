@@ -7,14 +7,17 @@ import type {
   AgentRuntime,
   InvocationRecord,
   InvocationResult,
+  PendingToolCall,
 } from '../contracts/runtime';
 import type { DatabaseHandle } from '../db/client';
 import { insertPolicyDecision } from '../db/repositories/decisions';
 import {
   claimInvocations,
   heartbeatInvocation,
+  markInvocationAwaitingApproval,
   markInvocationFailed,
   markInvocationSucceeded,
+  toPendingToolCall,
   toRecord,
 } from '../db/repositories/invocations';
 import type { InvocationRow } from '../db/schema';
@@ -40,6 +43,10 @@ export interface RunWorkerOptions {
     invocation: InvocationRecord,
     error: AgentRuntimeError,
   ) => Promise<void>;
+  onAwaitingApproval?: (
+    invocation: InvocationRecord,
+    pendingToolCall: PendingToolCall,
+  ) => Promise<void>;
 }
 
 export interface WorkerHandle {
@@ -61,6 +68,16 @@ function toAgentError(error: unknown): AgentRuntimeError {
 function errorCode(error: AgentRuntimeError): string {
   const code = error.diagnostics.code;
   return typeof code === 'string' ? code : 'execution_failed';
+}
+
+function pendingFromError(error: AgentRuntimeError): PendingToolCall {
+  const pending = toPendingToolCall(error.diagnostics.pendingToolCall);
+  if (pending) return pending;
+  const toolName = error.diagnostics.toolName;
+  return {
+    toolName: typeof toolName === 'string' ? toolName : 'unknown',
+    input: undefined,
+  };
 }
 
 export function runWorker(options: RunWorkerOptions): WorkerHandle {
@@ -116,6 +133,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           ...row.input,
           invocationId: String(row.id),
           runId: row.activeRunId!,
+          approvedToolCall: toPendingToolCall(row.pendingToolCall),
         });
       } finally {
         unsubscribe?.();
@@ -149,6 +167,20 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     } catch (error) {
       if (leaseLost) return;
       const agentError = toAgentError(error);
+      if (errorCode(agentError) === 'approval_required') {
+        const pendingToolCall = pendingFromError(agentError);
+        const parked = await markInvocationAwaitingApproval(
+          db,
+          row.id,
+          workerId,
+          row.activeRunId!,
+          pendingToolCall,
+        );
+        if (parked) {
+          await options.onAwaitingApproval?.(toRecord(parked), pendingToolCall);
+        }
+        return;
+      }
       const updated = await markInvocationFailed(
         db,
         row.id,

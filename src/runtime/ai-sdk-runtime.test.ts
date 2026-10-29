@@ -17,6 +17,7 @@ import type {
 } from '../contracts/runtime';
 import { AiSdkNativeRuntime } from './ai-sdk-runtime';
 import { openAiCompatible } from './model';
+import { PolicyEngine } from './policy-engine';
 
 const invocation: RuntimeInvocationInput = {
   scope: 'scope-a',
@@ -223,6 +224,35 @@ function runtime(
 }
 
 describe('AiSdkNativeRuntime', () => {
+  it.each([
+    [
+      { nested: { a: 1, b: 2 }, values: [1, 2] },
+      { values: [1, 2], nested: { b: 2, a: 1 } },
+      true,
+    ],
+    [[1, 2], [2, 1], false],
+    [null, null, true],
+    [undefined, undefined, true],
+    [null, undefined, false],
+  ])('matches canonical approval input %#', (approved, proposed, matches) => {
+    const engine = new PolicyEngine(
+      { requireApproval: ['gated'] },
+      {
+        approvedToolCall: { toolName: 'gated', input: approved },
+      },
+    );
+    const verdict = engine.approvalFor({
+      toolName: 'gated',
+      toolCallId: 'call',
+      toolInput: proposed,
+      proposalCount: 1,
+      scope: '',
+    });
+    expect(verdict === 'not-applicable').toBe(matches);
+    if (!matches)
+      expect(engine.terminalError?.diagnostics.code).toBe('approval_required');
+  });
+
   it('reserves the total budget before parallel calls can execute', async () => {
     const onPolicyDecision = vi.fn();
     const subject = runtime(
@@ -520,6 +550,126 @@ describe('AiSdkNativeRuntime', () => {
       );
     },
   );
+
+  it('executes a gated call that matches an approved tool call', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(toolCall('gated', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      {
+        policies: { requireApproval: [directoryTools.get] },
+        onPolicyDecision,
+      },
+    );
+
+    await expect(
+      subject.instance.invoke({
+        ...invocation,
+        approvedToolCall: {
+          toolName: directoryTools.get,
+          input: { recordId: 7 },
+        },
+      }),
+    ).resolves.toMatchObject({ text: 'Done' });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(onPolicyDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'require_approval',
+        decision: 'allow',
+        detail: { viaApproval: true },
+      }),
+    );
+  });
+
+  it('does not let an approval bypass the shared tool budget', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('ordinary', directoryTools.search, { query: 'roadmap' }),
+        ),
+        toolStep(toolCall('approved', directoryTools.get, { recordId: 7 })),
+        textStep('must not be requested'),
+      ],
+      {
+        maxToolCallsPerInvocation: 1,
+        policies: { requireApproval: [directoryTools.get] },
+        onPolicyDecision,
+      },
+    );
+    await expect(
+      subject.instance.invoke({
+        ...invocation,
+        approvedToolCall: {
+          toolName: directoryTools.get,
+          input: { recordId: 7 },
+        },
+      }),
+    ).rejects.toMatchObject({ message: 'Tool-call budget exceeded' });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(subject.callTool.mock.calls[0]![0].name).toBe(directoryTools.search);
+    expect(onPolicyDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'max_tool_calls',
+        decision: 'deny',
+        toolName: directoryTools.get,
+      }),
+    );
+    expect(onPolicyDecision).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'require_approval',
+        decision: 'allow',
+      }),
+    );
+  });
+
+  it('consumes an exact approval only once', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('first', directoryTools.get, { recordId: 7 })),
+        toolStep(toolCall('second', directoryTools.get, { recordId: 7 })),
+      ],
+      { policies: { requireApproval: [directoryTools.get] } },
+    );
+    await expect(
+      subject.instance.invoke({
+        ...invocation,
+        approvedToolCall: {
+          toolName: directoryTools.get,
+          input: { recordId: 7 },
+        },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'approval_required' } });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+  });
+
+  it('parks a gated call whose input differs from the approved call', async () => {
+    const subject = runtime(
+      [toolStep(toolCall('gated', directoryTools.get, { recordId: 7 }))],
+      { policies: { requireApproval: [directoryTools.get] } },
+    );
+
+    await expect(
+      subject.instance.invoke({
+        ...invocation,
+        approvedToolCall: {
+          toolName: directoryTools.get,
+          input: { recordId: 8 },
+        },
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: {
+        code: 'approval_required',
+        pendingToolCall: {
+          toolName: directoryTools.get,
+          input: { recordId: 7 },
+        },
+      },
+    });
+    expect(subject.callTool).not.toHaveBeenCalled();
+  });
 
   it('reuses the AI SDK loop for one tool, one MCP session, and final text', async () => {
     const subject = runtime([

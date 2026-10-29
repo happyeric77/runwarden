@@ -19,6 +19,11 @@ export interface InvocationResult {
   model?: string;
 }
 
+export interface PendingToolCall {
+  toolName: string;
+  input: unknown;
+}
+
 export type InvocationStatus =
   | 'pending'
   | 'running'
@@ -32,6 +37,7 @@ export interface InvocationRecord extends InvocationInput {
   status: InvocationStatus;
   attemptCount: number;
   resultText?: string;
+  pendingToolCall?: PendingToolCall;
   lastErrorCode?: string;
   lastErrorMessage?: string;
   createdAt: Date;
@@ -46,6 +52,7 @@ export interface NeutralMessage {
 export type RuntimeInvocationInput = InvocationInput & {
   invocationId: string;
   runId: string;
+  approvedToolCall?: PendingToolCall;
 };
 
 export interface AgentRuntime {

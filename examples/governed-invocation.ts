@@ -24,7 +24,7 @@ const fakeMcpClient: McpToolClient = {
         return JSON.stringify([
           {
             type: 'text',
-            text: `Note found: "Roadmap" — ship the runtime first.`,
+            text: `Note found: "Roadmap": ship the runtime first.`,
           },
         ]);
       },
