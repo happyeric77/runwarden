@@ -115,6 +115,9 @@ erDiagram
         text result_text
         text idempotency_key UK
         int attempt_count
+        text claimed_by
+        timestamptz lease_heartbeat_at
+        timestamptz lease_expires_at
         uuid active_run_id
         text last_error_code
         timestamptz created_at
