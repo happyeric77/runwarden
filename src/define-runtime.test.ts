@@ -2,6 +2,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { RUNTIME_INTERNALS } from './define-runtime';
 import * as api from './index';
 import { NativeMcpClient } from './mcp/native-mcp-client';
 
@@ -83,3 +84,98 @@ it('keeps loop and policy implementation details out of the public API', () => {
   }
   expect(api.defineRuntime).toBeTypeOf('function');
 });
+
+it.each([false, true])(
+  'routes audit events before observers and preserves the MCP key, persistence fails: %s',
+  async (failPersistence) => {
+    const order: string[] = [];
+    const calls = [
+      vi.fn().mockResolvedValue('ok'),
+      vi.fn().mockResolvedValue('ok'),
+    ];
+    const open = vi.spyOn(NativeMcpClient.prototype, 'open');
+    for (const callTool of calls)
+      open.mockResolvedValueOnce({ callTool, close: async () => {} });
+    let step = 0;
+    try {
+      const runtime = api.defineRuntime({
+        model: new MockLanguageModelV4({
+          doGenerate: async () => ({
+            content:
+              step++ === 0
+                ? [
+                    {
+                      type: 'tool-call',
+                      toolCallId: 'call',
+                      toolName: 'notes__get',
+                      input: '{}',
+                    },
+                  ]
+                : [{ type: 'text', text: 'Done' }],
+            finishReason: { unified: 'stop', raw: 'stop' },
+            usage: {
+              inputTokens: {
+                total: 1,
+                noCache: 1,
+                cacheRead: undefined,
+                cacheWrite: undefined,
+              },
+              outputTokens: { total: 1, text: 1, reasoning: undefined },
+            },
+            warnings: [],
+          }),
+        }),
+        tools: [
+          {
+            name: 'notes__get',
+            description: 'Get a note',
+            inputSchema: z.object({}),
+          },
+        ],
+        mcpServers: [
+          { name: 'first', url: 'http://first.invalid' },
+          {
+            name: 'second',
+            url: 'http://second.invalid',
+            tools: ['notes__get'],
+          },
+        ],
+        onToolCallAudit: (event) => {
+          order.push(`observer:${event.phase}`);
+          throw new Error('observer failed');
+        },
+      });
+      runtime[RUNTIME_INTERNALS]!.onToolCallAudit!(async (event) => {
+        order.push(`persist:${event.phase}`);
+        if (failPersistence) throw new Error('database failed');
+      });
+      if (failPersistence) {
+        await expect(
+          runtime.invoke({ scope: 'test', prompt: 'test' }),
+        ).rejects.toMatchObject({
+          diagnostics: { code: 'audit_persistence_failed' },
+        });
+        expect(order).toEqual(['persist:started']);
+        expect(open).not.toHaveBeenCalled();
+      } else {
+        await expect(
+          runtime.invoke({ scope: 'test', prompt: 'test' }),
+        ).resolves.toMatchObject({ text: 'Done' });
+        expect(order).toEqual([
+          'persist:started',
+          'observer:started',
+          'persist:succeeded',
+          'observer:succeeded',
+        ]);
+        expect(calls[0]).not.toHaveBeenCalled();
+        expect(calls[1]).toHaveBeenCalledWith(
+          expect.objectContaining({
+            idempotencyKey: expect.stringMatching(/^[0-9a-f]{64}$/),
+          }),
+        );
+      }
+    } finally {
+      open.mockRestore();
+    }
+  },
+);

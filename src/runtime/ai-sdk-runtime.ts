@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   tool,
   ToolLoopAgent,
@@ -333,6 +335,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
             inputSchema: definition.inputSchema,
             execute: async (arguments_, options) => {
               const audit = {
+                dispatchId: randomUUID(),
                 scope: input.scope,
                 invocationId: input.invocationId,
                 runId: input.runId,
@@ -345,10 +348,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
                 ),
                 input: arguments_,
               };
-              // An unaudited call must not dispatch. Audit failures go
-              // through policy.fail like MCP failures: the SDK turns a
-              // thrown tool error into a model-visible result, so only a
-              // terminal error stops the invocation.
+              // The SDK catches tool errors, so audit failures must also stop the loop.
               try {
                 await this.emitToolCallAudit({ ...audit, phase: 'started' });
               } catch (error) {

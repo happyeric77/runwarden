@@ -4,7 +4,11 @@ import { z } from 'zod';
 
 import { AgentRuntimeError } from '../contracts/errors';
 import type { PolicyDecision } from '../contracts/policy';
-import type { McpToolClient } from '../contracts/runtime';
+import type {
+  McpToolClient,
+  ToolCallAuditEvent,
+  ToolCallAuditSink,
+} from '../contracts/runtime';
 import { createDb, type DatabaseHandle } from '../db/client';
 import { initDb } from '../db/init';
 import {
@@ -878,7 +882,7 @@ describe('tool call audits', () => {
     await pg?.stop();
   });
 
-  function setup() {
+  function setup(onToolCallAudit?: ToolCallAuditSink) {
     const executed = { search: 0, refund: 0 };
     let failNextSearch = false;
     const fakeMcpClient: McpToolClient = {
@@ -954,6 +958,7 @@ describe('tool call audits', () => {
       db: handle,
       model,
       mcpClient: fakeMcpClient,
+      onToolCallAudit,
       tools: [
         {
           name: 'notes__search',
@@ -1012,6 +1017,183 @@ describe('tool call audits', () => {
     );
     return result.rows;
   }
+
+  it('fails instead of accepting a completion that did not update its claimed row', async () => {
+    const { runtime, worker, executed } = setup(async (event) => {
+      if (event.phase === 'started')
+        await handle.pool.query(
+          "update agent_runtime.tool_call_audits set metadata = jsonb_set(metadata, '{dispatchId}', '\"superseded\"') where invocation_id=$1",
+          [event.invocationId],
+        );
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'lost-audit',
+        prompt: 'Find the roadmap note',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status === 'failed',
+      );
+      expect((await runtime.getInvocation(invocationId))?.lastErrorCode).toBe(
+        'audit_persistence_failed',
+      );
+      expect(executed.search).toBe(1);
+      expect((await auditsFor(invocationId))[0]?.status).toBe('started');
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('isolates parallel tool events across workers sharing one runtime', async () => {
+    const listeners = new Set<(event: ToolCallAuditEvent) => Promise<void>>();
+    const emit = async (event: ToolCallAuditEvent) => {
+      await Promise.all([...listeners].map((listener) => listener(event)));
+    };
+    let entered = 0;
+    let release!: () => void;
+    const bothRunning = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runtime = {
+      [RUNTIME_INTERNALS]: {
+        onPolicyDecision: () => () => {},
+        onToolCallAudit(
+          listener: (event: ToolCallAuditEvent) => Promise<void>,
+        ) {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      },
+      engine: {
+        async invoke(
+          input: import('../contracts/runtime').RuntimeInvocationInput,
+        ) {
+          if (++entered === 2) release();
+          await bothRunning;
+          await Promise.all(
+            ['one', 'two'].map(async (toolName) => {
+              const event = {
+                scope: input.scope,
+                invocationId: input.invocationId,
+                runId: input.runId,
+                toolName,
+                dispatchId: `${input.runId}:${toolName}`,
+                idempotencyKey: `${input.invocationId}:${toolName}`,
+                input: { toolName },
+              };
+              await emit({
+                ...event,
+                phase: 'started',
+                runId: '00000000-0000-4000-8000-000000000000',
+              });
+              await emit({ ...event, phase: 'started' });
+              await emit({ ...event, phase: 'succeeded' });
+            }),
+          );
+          return {
+            invocationId: input.invocationId,
+            runId: input.runId,
+            text: 'Done',
+          };
+        },
+      },
+    };
+    const ids = await Promise.all(
+      ['a', 'b'].map((scope) =>
+        enqueueInvocation(handle.db, {
+          scope,
+          prompt: 'parallel',
+          maxAttempts: 1,
+        }),
+      ),
+    );
+    const workers = [0, 1].map(() =>
+      runWorker({ runtime, db: handle, pollIdleMs: 10, pollActiveMs: 10 }),
+    );
+    try {
+      for (const { invocationId } of ids) {
+        await waitFor(
+          async () =>
+            (await getInvocationRowById(handle.db, invocationId))?.status ===
+            'succeeded',
+        );
+        const invocation = await getInvocationRowById(handle.db, invocationId);
+        const audits = await auditsFor(invocationId);
+        expect(audits).toHaveLength(2);
+        expect(audits.map((row) => row.tool_name).sort()).toEqual([
+          'one',
+          'two',
+        ]);
+        for (const row of audits)
+          expect(row).toMatchObject({
+            scope: invocation!.scope,
+            run_id: invocation!.activeRunId,
+            status: 'succeeded',
+          });
+      }
+    } finally {
+      release();
+      await Promise.all(workers.map((worker) => worker.stop()));
+    }
+  });
+
+  it('fails a completion without a matching started event', async () => {
+    let listener: ((event: ToolCallAuditEvent) => Promise<void>) | undefined;
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'missing-start',
+      prompt: 'test',
+      maxAttempts: 1,
+    });
+    const worker = runWorker({
+      db: handle,
+      pollIdleMs: 10,
+      runtime: {
+        [RUNTIME_INTERNALS]: {
+          onPolicyDecision: () => () => {},
+          onToolCallAudit(callback) {
+            listener = callback;
+            return () => {
+              listener = undefined;
+            };
+          },
+        },
+        engine: {
+          async invoke(input) {
+            await listener!({
+              ...input,
+              phase: 'succeeded',
+              toolName: 'test',
+              dispatchId: 'missing',
+              idempotencyKey: 'missing',
+              input: {},
+            });
+            return {
+              invocationId: input.invocationId,
+              runId: input.runId,
+              text: 'must not succeed',
+            };
+          },
+        },
+      },
+    });
+    try {
+      await waitFor(
+        async () =>
+          (await getInvocationRowById(handle.db, invocationId))?.status ===
+          'failed',
+      );
+      expect(
+        (await getInvocationRowById(handle.db, invocationId))?.lastErrorMessage,
+      ).toContain('no started event');
+      expect(await auditsFor(invocationId)).toEqual([]);
+    } finally {
+      await worker.stop();
+    }
+  });
 
   it('writes a succeeded audit row for an executed call, none for a denied one', async () => {
     const { runtime, worker, executed } = setup();
