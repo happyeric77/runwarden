@@ -68,6 +68,7 @@
     "demo": "tsx examples/governed-invocation.ts",
     "format": "prettier --write '**/*.{ts,json,md}'",
     "format:check": "prettier --check '**/*.{ts,json,md}'",
+    "quickstart": "tsx examples/quickstart/main.ts",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit"

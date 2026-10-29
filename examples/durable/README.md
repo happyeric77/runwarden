@@ -6,6 +6,9 @@ process waits for the result. Another worker can reclaim an expired lease.
 Execution is at-least-once: work may repeat after a crash, so tool side effects
 must use stable idempotency keys.
 
+New here? Start with the [quickstart](../quickstart/README.md): the full
+policy + audit story with a scripted model: no API key needed.
+
 You need an OpenAI-compatible model endpoint. Set `MODEL_BASE_URL`,
 `MODEL_API_KEY`, and `MODEL_ID` in your shell (defaults point at OpenAI).
 Run from the repository root with Node.js 24+, pnpm 10.34.9, and Docker Compose
@@ -20,7 +23,7 @@ installed. Install dependencies first with `pnpm install --frozen-lockfile`.
    export DATABASE_URL=postgres://postgres:password@localhost:54329/durable_agent_runtime
    ```
 
-2. **Create the runtime tables** (idempotent — safe to re-run):
+2. **Create the runtime tables** (idempotent, safe to re-run):
 
    ```sh
    pnpm exec tsx src/cli.ts init
