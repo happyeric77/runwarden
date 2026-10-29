@@ -36,19 +36,23 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
 1. **Story 1 — a real lookup.** You ask for the roadmap note. The model
    calls `notes__search` through MCP, reads the result, and answers with
    what the note says. The invocation succeeds.
-2. **Story 2 — approval gate.** You ask for a refund of order 42. The
+2. **Story 2 — approval gate.** You ask for a refund of order 42, specifying
+   5000 cents and the reason "duplicate charge", and request the refund tool. The
    model proposes `billing__refund`, which is listed in `requireApproval`.
    The call is denied and recorded as `approval_requested`; the refund
    tool never executes and the invocation ends `failed` with code
    `approval_required`. That is fail-closed governance working as
    intended: in v1 there is no approval inbox yet, so a gated call simply
-   does not run.
+   does not run. Occasionally the model responds with text instead of proposing
+   a tool call. In that case, the script prints its response and reports that
+   nothing was intercepted, rather than claiming the gate blocked a call.
 3. **The audit trail.** The script queries `agent_runtime.invocations`
    and `agent_runtime.policy_decisions` and prints both: statuses,
    attempt counts, and the ruling behind every step above.
 
-The model's wording varies from run to run; the rulings do not — the
-refund is gated no matter how the model phrases its proposal.
+The model's wording and whether it proposes a tool call vary from run to run.
+Whenever it proposes `billing__refund`, the runtime gates that call; the final
+summary follows the recorded evidence, and both invocations are always audited.
 
 ## What just happened, in library terms
 
@@ -61,9 +65,9 @@ refund is gated no matter how the model phrases its proposal.
   only to keep the quickstart to one command — in production it is its
   own process (see the [durable example](../durable/README.md), which
   splits app and worker into separate processes).
-- Policy was enforced on the execution path by the runtime, not by asking
-  the model nicely: the gated tool was stopped before the MCP server ever
-  saw it.
+- Policy is enforced on the execution path by the runtime, not by asking
+  the model nicely: a proposed gated tool call is stopped before the MCP
+  server ever sees it.
 
 Want the deterministic, no-key version of the policy story?
 `pnpm demo` ([`examples/governed-invocation.ts`](../governed-invocation.ts))

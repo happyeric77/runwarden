@@ -77,8 +77,11 @@ pnpm quickstart
 
 The quickstart runs the full story against a local MCP server with a
 real model: a note lookup that executes through MCP, and a refund stopped
-by `requireApproval` — then it prints the audit rows from Postgres. The [quickstart README](examples/quickstart/README.md) walks
-through each step and what you should see.
+by `requireApproval` — then it prints both invocations and their policy decisions
+from Postgres. Occasionally the model responds with text instead of proposing
+the refund tool; the example reports that nothing was intercepted rather than
+claiming a blocked call. The [quickstart README](examples/quickstart/README.md)
+walks through each step and what you should see.
 
 For the production-shaped setup — separate app and worker processes and a
 real model provider — see [examples/durable](examples/durable/README.md).
