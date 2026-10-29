@@ -84,7 +84,12 @@ export class PolicyEngine {
   }
 
   fail(error: AgentRuntimeError): void {
-    this.terminal ??= error;
+    if (
+      !this.terminal ||
+      error.diagnostics.code === 'audit_persistence_failed'
+    ) {
+      this.terminal = error;
+    }
   }
 
   correctionInstruction(): string | undefined {

@@ -127,6 +127,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           invocationId: event.invocationId,
           scope: event.scope,
           runId: event.runId,
+          dispatchId: event.dispatchId,
           toolName: event.toolName,
           idempotencyKey: event.idempotencyKey,
           requestSnapshot: event.input ?? null,
@@ -134,12 +135,23 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
             ? { toolCallId: event.toolCallId }
             : undefined,
         });
-        auditIds.set(event.idempotencyKey, auditId);
+        auditIds.set(event.dispatchId, auditId);
         return;
       }
-      const auditId = auditIds.get(event.idempotencyKey);
-      if (auditId === undefined) return;
-      await completeToolCallAudit(db, auditId, event.phase, event.errorCode);
+      const auditId = auditIds.get(event.dispatchId);
+      if (auditId === undefined)
+        throw new Error('Tool audit completion has no started event');
+      const completed = await completeToolCallAudit(
+        db,
+        auditId,
+        event.phase,
+        event.errorCode,
+        event.runId,
+        event.dispatchId,
+      );
+      if (!completed)
+        throw new Error('Tool audit completion lost its dispatch claim');
+      auditIds.delete(event.dispatchId);
     });
     let leaseLost = false;
     const heartbeat = setInterval(() => {

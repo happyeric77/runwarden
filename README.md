@@ -50,11 +50,11 @@ per-call audit), with durable execution as the substrate underneath.
   through the library API. Approval reruns the whole invocation and
   only the exact approved call passes; rejection cancels it. Nothing
   sensitive executes unapproved.
-- **Audit trail in Postgres**: every invocation, every policy decision,
-  and every executed tool call is a row in the `agent_runtime` schema,
-  queryable with plain SQL. Each executed call carries a deterministic
-  idempotency key, also sent to the tool server, so a rerun can dedupe
-  its side effects.
+- **Audit trail in Postgres**: invocations, policy decisions, and the latest
+  dispatch state of each tool-call identity are queryable with plain SQL in
+  `agent_runtime`. A call identity is its invocation, tool name, and canonical
+  JSON arguments. Its deterministic idempotency key is sent to the tool server;
+  that server must implement deduplication to protect side effects.
 - **Durable execution**: invocations are claimed by workers under leases
   with heartbeats, retried with backoff, and fenced so a stale worker
   cannot overwrite a newer attempt. Delivery is at-least-once; idempotency
@@ -108,9 +108,9 @@ real model provider), see [examples/durable](examples/durable/README.md).
 4. At every model step, the proposed tool calls are checked against
    policy (exactly-one, allowlist, input validation, `requireApproval`)
    before anything executes through MCP.
-5. Every ruling lands in `policy_decisions`, every executed call lands
-   in `tool_call_audits`, and the invocation's state in `invocations`,
-   so the whole run can be reconstructed from SQL.
+5. Every ruling lands in `policy_decisions`, a call's latest dispatch state
+   lands in `tool_call_audits`, and invocation state lands in `invocations`.
+   Tool audits are latest-state records, not a history of every attempt.
 6. If a proposed call is listed in `requireApproval`, the invocation
    parks in `awaiting_approval` instead of failing. Your app resolves it
    with `approveInvocation` or `rejectInvocation`. Approval reruns the
@@ -221,10 +221,24 @@ The end of a quickstart run prints that trail. A typical run:
   reruns from the start, earlier tool calls can execute again, and
   idempotency keys guard their side effects. That cost is the price of
   invocation-level durability in v1.
-- **Audit scope today:** invocations, policy decisions, and executed
-  tool calls are recorded. A call that policy denies is never dispatched,
-  so it appears in `policy_decisions` only, with no `tool_call_audits`
-  row.
+- **Audit scope today:** tool audits are written as `started` before MCP
+  dispatch, then completed as `succeeded` or `failed`. A `started` row alone
+  does not prove execution; a policy-denied proposal emits no tool audit.
+  Repeated identical calls in one invocation reclaim the same row, including
+  retries and approval reruns. Reclaim replaces the run, request snapshot,
+  metadata, and timestamps, and clears the previous completion and error.
+  If the process then crashes, earlier success evidence is lost. This is a
+  deliberate latest-state tradeoff, not an append-only audit or a result cache.
+  Each dispatch has a separate fencing token in metadata; only that claim may
+  complete the row. Superseded completions fail with `audit_persistence_failed`,
+  including overlapping identical calls within one run. This does not undo
+  tool side effects or prevent duplicate execution at the tool server.
+- **Audit hooks:** `defineRuntime()` plus `runWorker()` persists tool events
+  before calling `onToolCallAudit`. Observer exceptions are ignored, but the
+  observer is awaited and must finish promptly. Persistence failures stop the
+  invocation, taking precedence over a tool error. Custom engines without the
+  optional internal tool-audit subscription run without tool audit persistence;
+  direct in-process invocation has no worker persistence listener either.
 - **Not hosted, not enterprise-grade:** a library you run yourself.
   Isolation between your own workloads is a single `scope` string, not a
   multi-tenant control plane.

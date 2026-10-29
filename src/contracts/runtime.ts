@@ -78,6 +78,7 @@ export interface McpToolSession {
 }
 
 export interface ToolCallAuditEvent {
+  dispatchId: string;
   phase: 'started' | 'succeeded' | 'failed';
   scope: string;
   invocationId: string;

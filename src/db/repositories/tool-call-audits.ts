@@ -6,6 +6,7 @@ export interface ToolCallAuditClaim {
   invocationId: string;
   scope: string;
   runId: string;
+  dispatchId: string;
   toolName: string;
   idempotencyKey: string;
   requestSnapshot: unknown;
@@ -30,7 +31,7 @@ export async function claimToolCallAudit(
       'started',
       now(),
       ${JSON.stringify(claim.requestSnapshot)}::jsonb,
-      ${claim.metadata ? JSON.stringify(claim.metadata) : null}::jsonb
+      ${JSON.stringify({ ...claim.metadata, dispatchId: claim.dispatchId })}::jsonb
     )
     on conflict (scope, tool_name, idempotency_key)
       where idempotency_key is not null
@@ -52,14 +53,18 @@ export async function completeToolCallAudit(
   db: Database,
   id: number,
   status: 'succeeded' | 'failed',
-  errorCode?: string,
+  errorCode: string | undefined,
+  runId: string,
+  dispatchId: string,
 ): Promise<boolean> {
   const updated = await db.execute(sql`
     update agent_runtime.tool_call_audits
     set status = ${status},
         completed_at = now(),
         error_code = ${errorCode ?? null}
-    where id = ${id}
+    where id = ${id} and status = 'started'
+      and run_id = ${runId}
+      and metadata->>'dispatchId' = ${dispatchId}
     returning id
   `);
   return updated.rows.length > 0;

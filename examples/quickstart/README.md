@@ -56,9 +56,12 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
 3. **The audit trail.** The script queries `agent_runtime.invocations`,
    `agent_runtime.policy_decisions`, and `agent_runtime.tool_call_audits`
    and prints all three: statuses, attempt counts, the ruling behind
-   every step above, and one row per executed call with the prefix of
-   its idempotency key. The denied refund proposal has no tool call
-   audit row: it was never dispatched.
+   every step above, and the latest dispatch state per call identity with the
+   prefix of its idempotency key. A denied refund proposal creates no tool
+   audit: it was never dispatched. Identical calls on retry or approval rerun
+   reuse the same row and overwrite earlier state, including prior success.
+   A crash after reclaim can leave only `started`, which does not prove the
+   tool executed. The example tools do not implement server-side deduplication.
 
 The model's wording and whether it proposes a tool call vary from run to run.
 Whenever it proposes `billing__refund`, the runtime gates that call; the final

@@ -744,6 +744,50 @@ describe('AiSdkNativeRuntime', () => {
     expect(events[1]?.errorCode).toBe('tool_call_failed');
   });
 
+  it('keeps retry and approval keys stable while separating parallel dispatches', async () => {
+    const events: ToolCallAuditEvent[] = [];
+    const responses = [
+      toolStep(
+        toolCall('same', directoryTools.get, { recordId: 7 }),
+        toolCall('same', directoryTools.get, { recordId: 7 }),
+      ),
+      textStep('Done'),
+    ];
+    const subject = runtime(responses, {
+      policies: { exactlyOneToolCallPerStep: false },
+      onToolCallAudit: (event) => void events.push(event),
+    });
+    await subject.instance.invoke(invocation);
+    const rerun = runtime(
+      [
+        toolStep(toolCall('approved', directoryTools.get, { recordId: 7 })),
+        textStep('Done'),
+      ],
+      {
+        policies: { requireApproval: [directoryTools.get] },
+        onToolCallAudit: (event) => void events.push(event),
+      },
+    );
+    await rerun.instance.invoke({
+      ...invocation,
+      runId: 'next-run',
+      approvedToolCall: {
+        toolName: directoryTools.get,
+        input: { recordId: 7 },
+      },
+    });
+    const starts = events.filter((event) => event.phase === 'started');
+    expect(starts).toHaveLength(3);
+    expect(new Set(starts.map((event) => event.idempotencyKey)).size).toBe(1);
+    expect(new Set(starts.map((event) => event.dispatchId)).size).toBe(3);
+    for (const start of starts)
+      expect(
+        events
+          .filter((event) => event.dispatchId === start.dispatchId)
+          .map((event) => event.phase),
+      ).toEqual(['started', 'succeeded']);
+  });
+
   it('emits no audit events for a policy-denied call', async () => {
     const events: ToolCallAuditEvent[] = [];
     const subject = runtime(
@@ -776,6 +820,26 @@ describe('AiSdkNativeRuntime', () => {
       diagnostics: { code: 'audit_persistence_failed' },
     });
     expect(subject.callTool).not.toHaveBeenCalled();
+  });
+
+  it('prioritizes a failed audit write over the original MCP error', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('call-1', directoryTools.get, { recordId: 7 })),
+        textStep('must not be requested'),
+      ],
+      {
+        toolError: new Error('MCP failed'),
+        onToolCallAudit: (event) => {
+          if (event.phase === 'failed') throw new Error('audit store down');
+        },
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toMatchObject({
+      diagnostics: { code: 'audit_persistence_failed' },
+    });
+    expect(subject.callTool).toHaveBeenCalledOnce();
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
   });
 
   it('fails the invocation when the succeeded audit write fails', async () => {
