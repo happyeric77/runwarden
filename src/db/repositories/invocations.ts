@@ -180,6 +180,26 @@ export async function claimInvocations(
   return (result.rows as Record<string, unknown>[]).map(mapRow);
 }
 
+// The worker sweeps with this before claiming so lease-exhausted terminal
+// transitions are returned for notification; the claim statement keeps its
+// own exhausted CTE as the guard for direct callers.
+export async function failExhaustedLeaseInvocations(
+  db: Database,
+): Promise<InvocationRow[]> {
+  const result = await db.execute(sql`
+    update agent_runtime.invocations
+    set status = 'failed',
+        failed_at = now(), completed_at = now(), updated_at = now(),
+        last_error_code = 'lease_expired',
+        last_error_message = 'Lease expired on the final attempt',
+        ${CLEAR_CLAIM}
+    where status = 'running' and lease_expires_at < now()
+      and attempt_count >= max_attempts
+    returning *
+  `);
+  return (result.rows as Record<string, unknown>[]).map(mapRow);
+}
+
 export async function heartbeatInvocation(
   db: Database,
   id: number,

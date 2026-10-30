@@ -1142,6 +1142,131 @@ describe('invocation settled callbacks', () => {
       await worker.stop();
     }
   });
+
+  it('fires with failed when the final attempt lease expires', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Never runs.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const { invocationId } = await runtime.enqueue({
+      scope: 'settled-lease-expired',
+      prompt: 'Claimed by a worker that dies',
+      maxAttempts: 1,
+    });
+    // Simulate a worker that claims the invocation and dies mid-run.
+    const claimed = await claimInvocations(handle.db, 'worker-doomed', {
+      leaseTimeoutMs: 400,
+      maxBatchSize: 1,
+    });
+    expect(claimed.map((row) => String(row.id))).toContain(invocationId);
+    await sleep(700);
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires settled even when the worker onSucceeded callback throws', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Done.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      onSucceeded: () => {
+        throw new Error('legacy hook bug');
+      },
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-legacy-success-throws',
+        prompt: 'Say hi',
+      });
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'succeeded',
+      });
+      const record = await runtime.getInvocation(invocationId);
+      expect(record?.status).toBe('succeeded');
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires settled even when the worker onFailed callback throws', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => {
+          await sleep(300);
+          throw new Error('provider exploded');
+        },
+      }),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 10,
+      onFailed: () => {
+        throw new Error('legacy hook bug');
+      },
+    });
+    const { invocationId } = await runtime.enqueue({
+      scope: 'settled-legacy-failure-throws',
+      prompt: 'Boom',
+      maxAttempts: 1,
+    });
+    await waitFor(
+      async () =>
+        (await runtime.getInvocation(invocationId))?.status === 'running',
+    );
+    // Attach the stop handler before the legacy hook can throw: its throw
+    // rejecting the worker loop is pre-existing behavior under test here
+    // only for the settled notification surviving it.
+    const stopped = worker.stop().catch(() => 'loop rejected');
+    await waitFor(async () => settled.length === 1);
+    expect(settled[0]).toMatchObject({
+      id: invocationId,
+      status: 'failed',
+    });
+    await stopped;
+  });
 });
 
 describe('tool call audits', () => {

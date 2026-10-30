@@ -13,6 +13,7 @@ import type { DatabaseHandle } from '../db/client.js';
 import { insertPolicyDecision } from '../db/repositories/decisions.js';
 import {
   claimInvocations,
+  failExhaustedLeaseInvocations,
   getInvocationRowById,
   heartbeatInvocation,
   markInvocationAwaitingApproval,
@@ -203,14 +204,29 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         },
       );
       if (marked) {
+        const settledRecord = await getInvocationRowById(
+          db,
+          String(row.id),
+        ).then(
+          (settledRow) =>
+            settledRow
+              ? toRecord(settledRow)
+              : {
+                  ...record,
+                  status: 'succeeded' as const,
+                  resultText: result.text,
+                },
+          () => ({
+            ...record,
+            status: 'succeeded' as const,
+            resultText: result.text,
+          }),
+        );
+        await internals?.notifyInvocationSettled?.(settledRecord);
         await options.onSucceeded?.(
           { ...record, status: 'succeeded', resultText: result.text },
           result,
         );
-        const settledRow = await getInvocationRowById(db, String(row.id));
-        if (settledRow) {
-          await internals?.notifyInvocationSettled?.(toRecord(settledRow));
-        }
       }
     } catch (error) {
       if (leaseLost) return;
@@ -238,8 +254,8 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         retryDelayMs,
       );
       if (updated?.status === 'failed') {
-        await options.onFailed?.(toRecord(updated), agentError);
         await internals?.notifyInvocationSettled?.(toRecord(updated));
+        await options.onFailed?.(toRecord(updated), agentError);
       }
     } finally {
       clearInterval(heartbeat);
@@ -250,6 +266,10 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     while (!stopped) {
       let claimed: InvocationRow[] = [];
       try {
+        const exhausted = await failExhaustedLeaseInvocations(db);
+        for (const exhaustedRow of exhausted) {
+          await internals?.notifyInvocationSettled?.(toRecord(exhaustedRow));
+        }
         claimed = await claimInvocations(db, workerId, {
           leaseTimeoutMs,
           // Execution is serial, so only claim work we can heartbeat now.
