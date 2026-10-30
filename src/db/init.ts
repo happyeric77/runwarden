@@ -22,17 +22,34 @@ const LEDGER_DDL = `
   )
 `;
 
-// Source and unbundled builds keep init two levels below the package root;
-// the bundled build flattens it into dist/, one level below.
-const MIGRATIONS_DIR_CANDIDATES = ['../../migrations/', '../migrations/'];
+const PACKAGE_NAME = 'runwarden';
 
-async function defaultMigrationsDir(): Promise<string> {
-  for (const candidate of MIGRATIONS_DIR_CANDIDATES) {
-    const dir = fileURLToPath(new URL(candidate, import.meta.url));
-    const files = await readdir(dir).catch(() => null);
-    if (files?.some((file) => file.endsWith('.sql'))) return dir;
+// Bundlers place this module at different depths, so depth counting is not
+// reliable; locate the package by its own package.json instead. Searching
+// relative depths can escape the package and pick up foreign migrations.
+export async function resolveMigrationsDir(moduleUrl: string): Promise<string> {
+  let dir = path.dirname(fileURLToPath(moduleUrl));
+  for (;;) {
+    const manifest = await readFile(path.join(dir, 'package.json'), 'utf8')
+      .then((text) => JSON.parse(text) as { name?: string })
+      .catch(() => null);
+    if (manifest?.name === PACKAGE_NAME) {
+      const migrationsDir = path.join(dir, 'migrations');
+      const files = await readdir(migrationsDir).catch(() => null);
+      if (files?.some((file) => file.endsWith('.sql'))) return migrationsDir;
+      throw new Error(
+        `runwarden: no .sql migrations found in ${migrationsDir}. ` +
+          'The installation looks incomplete; reinstall runwarden or pass InitOptions.migrationsDir.',
+      );
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  return fileURLToPath(new URL(MIGRATIONS_DIR_CANDIDATES[0], import.meta.url));
+  throw new Error(
+    'runwarden: could not locate the runwarden package root from ' +
+      `${fileURLToPath(moduleUrl)}. Pass InitOptions.migrationsDir to initDb.`,
+  );
 }
 
 // The ledger needs its schema before the first migration runs.
@@ -40,10 +57,22 @@ export async function initDb(
   handle: DatabaseHandle,
   options: InitOptions = {},
 ): Promise<InitResult> {
-  const dir = options.migrationsDir ?? (await defaultMigrationsDir());
-  const files = (await readdir(dir))
-    .filter((file) => file.endsWith('.sql'))
-    .sort();
+  const dir =
+    options.migrationsDir ?? (await resolveMigrationsDir(import.meta.url));
+  const entries = await readdir(dir).catch(() => null);
+  if (!entries) {
+    throw new Error(
+      `runwarden: migrations directory not found: ${dir}. ` +
+        'Pass InitOptions.migrationsDir if the migrations live elsewhere.',
+    );
+  }
+  const files = entries.filter((file) => file.endsWith('.sql')).sort();
+  if (files.length === 0) {
+    throw new Error(
+      `runwarden: no .sql migrations found in ${dir}. ` +
+        'Pass InitOptions.migrationsDir if the migrations live elsewhere.',
+    );
+  }
   const client = await handle.pool.connect();
   try {
     await client.query(`select pg_advisory_lock(hashtext('runwarden:init'))`);
