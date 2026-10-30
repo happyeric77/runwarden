@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import type { LanguageModel } from 'ai';
 
-import { AgentRuntimeError } from './contracts/errors';
+import { AgentRuntimeError } from './contracts/errors.js';
 import type {
   McpServerConfig,
   PolicyDecision,
   RuntimePolicies,
   ToolDefinition,
-} from './contracts/policy';
+} from './contracts/policy.js';
 import type {
   AgentRuntime,
   HistoryLoader,
@@ -21,27 +21,27 @@ import type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
-} from './contracts/runtime';
-import type { DatabaseHandle } from './db/client';
+} from './contracts/runtime.js';
+import type { DatabaseHandle } from './db/client.js';
 import {
   listAwaitingApprovalRows,
   resolveInvocationApproval,
   type ApprovalResolutionOptions,
-} from './db/repositories/approvals';
+} from './db/repositories/approvals.js';
 import {
   enqueueInvocation,
   getInvocationRowById,
   toPendingToolCall,
   toRecord,
-} from './db/repositories/invocations';
-import { NativeMcpClient } from './mcp/native-mcp-client';
-import { AiSdkNativeRuntime } from './runtime/ai-sdk-runtime';
+} from './db/repositories/invocations.js';
+import { NativeMcpClient } from './mcp/native-mcp-client.js';
+import { AiSdkNativeRuntime } from './runtime/ai-sdk-runtime.js';
 import {
   openAiCompatible,
   type OpenAiCompatibleModelConfig,
-} from './runtime/model';
+} from './runtime/model.js';
 
-export type { DatabaseHandle } from './db/client';
+export type { DatabaseHandle } from './db/client.js';
 
 // Keep worker subscriptions off the public package surface.
 export const RUNTIME_INTERNALS: unique symbol = Symbol('runwarden/internals');

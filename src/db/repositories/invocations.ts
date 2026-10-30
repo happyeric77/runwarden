@@ -4,9 +4,9 @@ import type {
   InvocationInput,
   InvocationRecord,
   PendingToolCall,
-} from '../../contracts/runtime';
-import type { Database } from '../client';
-import type { InvocationRow } from '../schema';
+} from '../../contracts/runtime.js';
+import type { Database } from '../client.js';
+import type { InvocationRow } from '../schema.js';
 
 // Raw queries bypass Drizzle's bigint and column-name mapping.
 export function mapRow(raw: Record<string, unknown>): InvocationRow {

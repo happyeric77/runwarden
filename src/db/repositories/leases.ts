@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 
-import type { Database } from '../client';
+import type { Database } from '../client.js';
 
 export async function tryAcquireWorkerLease(
   db: Database,

@@ -245,12 +245,16 @@ The end of a quickstart run prints that trail. A typical run:
 
 ## Development
 
+Building requires Node.js 22.18+ on the 22.x line, 24.11+ on the 24.x line,
+or 26+ to support tsdown and its declaration generator.
+
 ```sh
 pnpm install
 pnpm test              # unit tests
 pnpm test:integration  # real Postgres via embedded-postgres
 pnpm typecheck
 pnpm format:check
+pnpm build             # compile src to dist (what npm publishes)
 pnpm demo              # in-process governed invocation, no database
 ```
 

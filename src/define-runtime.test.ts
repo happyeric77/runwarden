@@ -2,9 +2,9 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { RUNTIME_INTERNALS } from './define-runtime';
-import * as api from './index';
-import { NativeMcpClient } from './mcp/native-mcp-client';
+import { RUNTIME_INTERNALS } from './define-runtime.js';
+import * as api from './index.js';
+import { NativeMcpClient } from './mcp/native-mcp-client.js';
 
 it.each([0, 1])(
   'closes every successful session when server %i fails to open',
