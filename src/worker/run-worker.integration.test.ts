@@ -978,7 +978,7 @@ describe('invocation settled callbacks', () => {
     }
   });
 
-  it('fires with cancelled on rejection, and only at completion on approval', async () => {
+  it('isolates throwing settled callbacks on rejection and approved completion', async () => {
     const settled: InvocationRecord[] = [];
     const fakeMcpClient: McpToolClient = {
       async open() {
@@ -1042,8 +1042,9 @@ describe('invocation settled callbacks', () => {
       loadSystemPrompt: async () => 'You are a helpful billing assistant.',
       loadHistory: async () => [],
       policies: { requireApproval: ['billing__refund'] },
-      onInvocationSettled: (invocation) => {
+      onInvocationSettled: async (invocation) => {
         settled.push(invocation);
+        throw new Error('observer bug');
       },
     });
     const worker = runWorker({
@@ -1101,12 +1102,14 @@ describe('invocation settled callbacks', () => {
   });
 
   it('a throwing settled callback does not affect the invocation', async () => {
+    let callbackCount = 0;
     const runtime = defineRuntime({
       db: handle,
       model: textModel('Fine.'),
       loadSystemPrompt: async () => 'You are helpful.',
       loadHistory: async () => [],
       onInvocationSettled: () => {
+        callbackCount++;
         throw new Error('observer bug');
       },
     });
@@ -1126,6 +1129,15 @@ describe('invocation settled callbacks', () => {
         waitTimeoutMs: 30_000,
       });
       expect(result.text).toBe('Fine.');
+      const next = await runtime.enqueue({
+        scope: 'settled-throwing',
+        prompt: 'Keep working',
+      });
+      await runtime.waitForInvocation(next.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      await waitFor(async () => callbackCount === 2);
     } finally {
       await worker.stop();
     }
