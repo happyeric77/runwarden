@@ -64,7 +64,139 @@ per-call audit), with durable execution as the substrate underneath.
 - **Your database**: `runwarden init` creates the schema in your own
   Postgres. No hosted service, no separate state store.
 
-## Quick Start
+## Getting Started
+
+### Requirements
+
+- Node.js 22 or newer
+- Postgres (your own, or the Docker one-liner in the steps below)
+- A model API key for any OpenAI-compatible endpoint
+
+```sh
+mkdir my-agent && cd my-agent
+npm init -y
+npm install runwarden @modelcontextprotocol/sdk zod
+npm install -D tsx
+
+docker run -d --name runwarden-pg -e POSTGRES_PASSWORD=password -e POSTGRES_DB=runwarden -p 5432:5432 postgres:17
+export DATABASE_URL=postgres://postgres:password@localhost:5432/runwarden
+export MODEL_API_KEY=<your key>
+
+npx runwarden init
+```
+
+With pnpm, install with `pnpm add` instead and run the CLI as
+`pnpm exec runwarden init`.
+
+Save this as `main.ts`:
+
+```ts
+import { createServer } from 'node:http';
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createDb, defineRuntime, runWorker } from 'runwarden';
+import { z } from 'zod';
+
+// A tiny MCP tool server with one tool. In your app this can be any
+// MCP server; here it runs in-process so the example is self-contained.
+function buildToolServer(): McpServer {
+  const server = new McpServer({ name: 'getting-started', version: '1' });
+  server.registerTool(
+    'notes__search',
+    {
+      description: 'Search the notes collection by keyword.',
+      inputSchema: { query: z.string() },
+    },
+    async ({ query }) => ({
+      content: [
+        {
+          type: 'text' as const,
+          text:
+            query.trim().toLowerCase() === 'roadmap'
+              ? 'Roadmap note: "Ship the runtime first, add features later."'
+              : 'No matching note.',
+        },
+      ],
+    }),
+  );
+  return server;
+}
+const httpServer = createServer(async (request, response) => {
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  await buildToolServer().connect(transport);
+  await transport.handleRequest(request, response);
+});
+await new Promise<void>((resolve) =>
+  httpServer.listen(43121, '127.0.0.1', resolve),
+);
+
+const db = createDb(process.env.DATABASE_URL!);
+const runtime = defineRuntime({
+  db,
+  provider: {
+    baseUrl: process.env.MODEL_BASE_URL ?? 'https://api.openai.com/v1',
+    apiKey: process.env.MODEL_API_KEY!,
+    model: process.env.MODEL_ID ?? 'gpt-4o-mini',
+  },
+  mcpServers: [
+    {
+      name: 'local',
+      url: 'http://127.0.0.1:43121/mcp',
+      tools: ['notes__search'],
+    },
+  ],
+  tools: [
+    {
+      name: 'notes__search',
+      description: 'Search the notes collection by keyword.',
+      inputSchema: z.object({ query: z.string() }),
+    },
+  ],
+  loadSystemPrompt: async () => 'You are a helpful assistant.',
+  loadHistory: async () => [],
+});
+
+const worker = runWorker({ runtime, db });
+try {
+  const result = await runtime.invoke({
+    scope: 'getting-started',
+    prompt: 'Find the roadmap note and tell me what it says.',
+  });
+  console.log(`[app] ${result.text}`);
+
+  const audits = await db.pool.query(
+    'select tool_name, status from agent_runtime.tool_call_audits order by requested_at',
+  );
+  console.log('[audit]', JSON.stringify(audits.rows));
+} finally {
+  await worker.stop();
+  await db.close();
+  httpServer.close();
+}
+```
+
+```sh
+npx tsx main.ts
+```
+
+You should see:
+
+```text
+[app] The roadmap note says: "Ship the runtime first, add features later."
+[audit] [{"tool_name":"notes__search","status":"succeeded"}]
+```
+
+The invocation ran in a durable worker, the tool call executed through
+MCP under policy, and the audit row is already in your Postgres. To gate
+a tool behind human approval, add
+`policies: { requireApproval: ['your__tool'] }` to `defineRuntime`; the
+[full quickstart](examples/quickstart/README.md) walks through that flow
+end to end.
+
+## The full quickstart (from the repo)
 
 ### Requirements
 
