@@ -1213,6 +1213,7 @@ describe('invocation settled callbacks', () => {
       expect(settled[0]).toMatchObject({
         id: invocationId,
         status: 'succeeded',
+        resultText: 'Done.',
       });
       const record = await runtime.getInvocation(invocationId);
       expect(record?.status).toBe('succeeded');
@@ -1264,6 +1265,7 @@ describe('invocation settled callbacks', () => {
     expect(settled[0]).toMatchObject({
       id: invocationId,
       status: 'failed',
+      lastErrorCode: 'execution_failed',
     });
     await stopped;
   });
