@@ -247,6 +247,14 @@ real model provider), see [examples/durable](examples/durable/README.md).
    parks in `awaiting_approval` instead of failing. Your app resolves it
    with `approveInvocation` or `rejectInvocation`. Approval reruns the
    whole invocation; rejection cancels it.
+7. When an invocation reaches a terminal state (succeeded, failed, or
+   cancelled), the optional `onInvocationSettled` callback from
+   `defineRuntime` fires with the final invocation record, so your app
+   can react: notify, chain the next step, or record the outcome. The
+   callback runs in the process that settled the invocation (the worker
+   for completions and final failures, the caller for rejections), after
+   the state is persisted. Callback errors are swallowed; they never
+   change the invocation's outcome.
 
 All of it lives in four tables in the `agent_runtime` schema:
 

@@ -15,6 +15,7 @@ import type {
   InvocationInput,
   InvocationRecord,
   InvocationResult,
+  InvocationSettledListener,
   McpToolClient,
   McpToolSession,
   RuntimeMetrics,
@@ -51,6 +52,7 @@ export interface RuntimeInternals {
   onToolCallAudit?: (
     listener: (event: ToolCallAuditEvent) => Promise<void>,
   ) => () => void;
+  notifyInvocationSettled?: (invocation: InvocationRecord) => Promise<void>;
 }
 
 export interface DefineRuntimeOptions {
@@ -66,6 +68,7 @@ export interface DefineRuntimeOptions {
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
   onToolCallAudit?: ToolCallAuditSink;
+  onInvocationSettled?: InvocationSettledListener;
 }
 
 export interface InvokeOptions {
@@ -202,6 +205,16 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
 
   const db = options.db;
 
+  async function notifyInvocationSettled(
+    invocation: InvocationRecord,
+  ): Promise<void> {
+    try {
+      await options.onInvocationSettled?.(invocation);
+    } catch {
+      // Observers must not affect the invocation.
+    }
+  }
+
   async function waitForInvocation(
     invocationId: string,
     opts?: InvokeOptions,
@@ -289,7 +302,11 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
         { code: 'invocation_not_awaiting_approval', invocationId: id },
       );
     }
-    return toRecord(result.row);
+    const record = toRecord(result.row);
+    if (resolution === 'rejected') {
+      await notifyInvocationSettled(record);
+    }
+    return record;
   }
 
   return {
@@ -332,6 +349,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           auditListeners.delete(listener);
         };
       },
+      notifyInvocationSettled,
     },
   };
 }

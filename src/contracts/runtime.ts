@@ -44,6 +44,10 @@ export interface InvocationRecord extends InvocationInput {
   completedAt?: Date;
 }
 
+export type InvocationSettledListener = (
+  invocation: InvocationRecord,
+) => void | Promise<void>;
+
 export interface NeutralMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;

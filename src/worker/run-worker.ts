@@ -13,6 +13,7 @@ import type { DatabaseHandle } from '../db/client.js';
 import { insertPolicyDecision } from '../db/repositories/decisions.js';
 import {
   claimInvocations,
+  getInvocationRowById,
   heartbeatInvocation,
   markInvocationAwaitingApproval,
   markInvocationFailed,
@@ -206,6 +207,10 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           { ...record, status: 'succeeded', resultText: result.text },
           result,
         );
+        const settledRow = await getInvocationRowById(db, String(row.id));
+        if (settledRow) {
+          await internals?.notifyInvocationSettled?.(toRecord(settledRow));
+        }
       }
     } catch (error) {
       if (leaseLost) return;
@@ -234,6 +239,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       );
       if (updated?.status === 'failed') {
         await options.onFailed?.(toRecord(updated), agentError);
+        await internals?.notifyInvocationSettled?.(toRecord(updated));
       }
     } finally {
       clearInterval(heartbeat);

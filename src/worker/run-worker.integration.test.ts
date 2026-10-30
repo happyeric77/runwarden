@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { AgentRuntimeError } from '../contracts/errors.js';
 import type { PolicyDecision } from '../contracts/policy.js';
 import type {
+  InvocationRecord,
   McpToolClient,
   ToolCallAuditEvent,
   ToolCallAuditSink,
@@ -861,6 +862,270 @@ describe('approval state machine', () => {
         (await runtime.listPendingApprovals('')).map((row) => row.id),
       ).toEqual([ids[0]]);
       for (const id of ids) await runtime.rejectInvocation(id);
+    } finally {
+      await worker.stop();
+    }
+  });
+});
+
+describe('invocation settled callbacks', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function textModel(text: string) {
+    return new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text', text }],
+        finishReason: { unified: 'stop', raw: 'stop' } as const,
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+        },
+        warnings: [],
+      }),
+    });
+  }
+
+  it('fires once with the final record when an invocation succeeds', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('All done.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-success',
+        prompt: 'Say hi',
+      });
+      await waitFor(async () => settled.length === 1);
+      await sleep(200);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        scope: 'settled-success',
+        status: 'succeeded',
+        resultText: 'All done.',
+      });
+      expect(settled[0]?.completedAt).toBeTruthy();
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires once when an invocation fails its final attempt', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => {
+          throw new Error('provider exploded');
+        },
+      }),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-failure',
+        prompt: 'Boom',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+      });
+      expect(settled[0]?.lastErrorCode).toBeTruthy();
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires with cancelled on rejection, and only at completion on approval', async () => {
+    const settled: InvocationRecord[] = [];
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool() {
+            return JSON.stringify([
+              { type: 'text', text: 'Refund issued for order 42.' },
+            ]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        });
+        if (promptText.includes('Refund issued')) {
+          return finish([{ type: 'text', text: 'Refund completed.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-refund',
+            toolName: 'billing__refund',
+            input: JSON.stringify({
+              amountCents: 5000,
+              reason: 'duplicate charge',
+            }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'billing__refund',
+          description: 'Refund a charge to the original payment method.',
+          inputSchema: z.object({
+            amountCents: z.number().int().positive(),
+            reason: z.string().min(1),
+          }),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are a helpful billing assistant.',
+      loadHistory: async () => [],
+      policies: { requireApproval: ['billing__refund'] },
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const rejected = await runtime.enqueue({
+        scope: 'settled-cancelled',
+        prompt: 'Refund order 42',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(rejected.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      expect(settled).toHaveLength(0);
+      await runtime.rejectInvocation(rejected.invocationId);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: rejected.invocationId,
+        status: 'cancelled',
+        lastErrorCode: 'approval_rejected',
+      });
+
+      const approved = await runtime.enqueue({
+        scope: 'settled-approved',
+        prompt: 'Refund order 42',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(approved.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      await runtime.approveInvocation(approved.invocationId);
+      const result = await runtime.waitForInvocation(approved.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Refund completed.');
+      await waitFor(async () => settled.length === 2);
+      await sleep(200);
+      expect(settled).toHaveLength(2);
+      expect(settled[1]).toMatchObject({
+        id: approved.invocationId,
+        status: 'succeeded',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('a throwing settled callback does not affect the invocation', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Fine.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: () => {
+        throw new Error('observer bug');
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-throwing',
+        prompt: 'Say hi',
+      });
+      const result = await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Fine.');
     } finally {
       await worker.stop();
     }
