@@ -22,14 +22,25 @@ const LEDGER_DDL = `
   )
 `;
 
+// Source and unbundled builds keep init two levels below the package root;
+// the bundled build flattens it into dist/, one level below.
+const MIGRATIONS_DIR_CANDIDATES = ['../../migrations/', '../migrations/'];
+
+async function defaultMigrationsDir(): Promise<string> {
+  for (const candidate of MIGRATIONS_DIR_CANDIDATES) {
+    const dir = fileURLToPath(new URL(candidate, import.meta.url));
+    const files = await readdir(dir).catch(() => null);
+    if (files?.some((file) => file.endsWith('.sql'))) return dir;
+  }
+  return fileURLToPath(new URL(MIGRATIONS_DIR_CANDIDATES[0], import.meta.url));
+}
+
 // The ledger needs its schema before the first migration runs.
 export async function initDb(
   handle: DatabaseHandle,
   options: InitOptions = {},
 ): Promise<InitResult> {
-  const dir =
-    options.migrationsDir ??
-    fileURLToPath(new URL('../../migrations/', import.meta.url));
+  const dir = options.migrationsDir ?? (await defaultMigrationsDir());
   const files = (await readdir(dir))
     .filter((file) => file.endsWith('.sql'))
     .sort();
