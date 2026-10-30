@@ -1,5 +1,6 @@
 import { MockLanguageModelV4 } from 'ai/test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { AgentRuntimeError } from '../contracts/errors.js';
@@ -1335,6 +1336,206 @@ describe('invocation settled callbacks', () => {
         status: 'failed',
         lastErrorCode: 'lease_expired',
       });
+    } finally {
+      releaseGate();
+      await worker.stop();
+    }
+  });
+
+  it('keeps the claimed lease alive while an exhausted callback is blocked', async () => {
+    const expired = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-alive',
+      prompt: 'Expired work',
+      maxAttempts: 1,
+    });
+    await claimInvocations(handle.db, 'dead', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    await handle.pool.query(
+      `update agent_runtime.invocations set lease_expires_at = now() - interval '1 second' where id = $1`,
+      [expired.invocationId],
+    );
+    const pending = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-alive',
+      prompt: 'Only A should execute',
+    });
+    const settledA: InvocationRecord[] = [];
+    const settledB: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtimeA = defineRuntime({
+      db: handle,
+      model: textModel('A completed.'),
+      onInvocationSettled: async (record) => {
+        settledA.push(record);
+        if (record.id === expired.invocationId) await gate;
+      },
+    });
+    const runtimeB = defineRuntime({
+      db: handle,
+      model: textModel('B must not execute.'),
+      onInvocationSettled: (record) => {
+        settledB.push(record);
+      },
+    });
+    const invokeA = vi.spyOn(runtimeA.engine, 'invoke');
+    const invokeB = vi.spyOn(runtimeB.engine, 'invoke');
+    const workerA = runWorker({
+      runtime: runtimeA,
+      db: handle,
+      workerId: 'guard-alive-A',
+      leaseTimeoutMs: 300,
+      heartbeatIntervalMs: 25,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+    });
+    let workerB: ReturnType<typeof runWorker> | undefined;
+    try {
+      await waitFor(async () => settledA.length === 1);
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-alive-A',
+        attemptCount: 1,
+      });
+      workerB = runWorker({
+        runtime: runtimeB,
+        db: handle,
+        workerId: 'guard-alive-B',
+        leaseTimeoutMs: 300,
+        heartbeatIntervalMs: 25,
+        pollIdleMs: 10,
+        pollActiveMs: 10,
+      });
+      await sleep(1_000);
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-alive-A',
+        attemptCount: 1,
+      });
+      expect(invokeA).not.toHaveBeenCalled();
+      expect(invokeB).not.toHaveBeenCalled();
+      expect(settledB).toEqual([]);
+      releaseGate();
+      await waitFor(async () => settledA.length === 2);
+      expect(invokeA).toHaveBeenCalledTimes(1);
+      expect(invokeB).not.toHaveBeenCalled();
+      expect(settledA).toMatchObject([
+        {
+          id: expired.invocationId,
+          status: 'failed',
+          lastErrorCode: 'lease_expired',
+        },
+        { id: pending.invocationId, status: 'succeeded', attemptCount: 1 },
+      ]);
+      expect(settledB).toEqual([]);
+    } finally {
+      releaseGate();
+      await Promise.all([workerA.stop(), workerB?.stop()]);
+    }
+  });
+
+  it('does not dispatch claimed work taken over during a blocked exhausted callback', async () => {
+    const expired = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-lost',
+      prompt: 'Expired work',
+      maxAttempts: 1,
+    });
+    await claimInvocations(handle.db, 'dead', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    await handle.pool.query(
+      `update agent_runtime.invocations set lease_expires_at = now() - interval '1 second' where id = $1`,
+      [expired.invocationId],
+    );
+    const pending = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-lost',
+      prompt: 'Taken over before dispatch',
+    });
+    const settled: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    let callbackReturned = false;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Must not execute.'),
+      onInvocationSettled: async (record) => {
+        settled.push(record);
+        if (record.id === expired.invocationId) {
+          await gate;
+          callbackReturned = true;
+        }
+      },
+    });
+    const invoke = vi.spyOn(runtime.engine, 'invoke');
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      workerId: 'guard-lost-A',
+      leaseTimeoutMs: 30_000,
+      // Require the pre-dispatch beat to detect takeover before the interval fires.
+      heartbeatIntervalMs: 60_000,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+    });
+    try {
+      await waitFor(async () => settled.length === 1);
+      const original = await getInvocationRowById(
+        handle.db,
+        pending.invocationId,
+      );
+      expect(original).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-lost-A',
+        attemptCount: 1,
+      });
+      const takeover = await handle.db.transaction(async (tx) => {
+        await tx.execute(sql`
+          update agent_runtime.invocations
+          set lease_expires_at = now() - interval '1 second'
+          where id = ${Number(pending.invocationId)}
+        `);
+        return claimInvocations(tx, 'guard-lost-B', {
+          leaseTimeoutMs: 30_000,
+          maxBatchSize: 1,
+        });
+      });
+      expect(takeover.claimed).toMatchObject([
+        {
+          id: Number(pending.invocationId),
+          claimedBy: 'guard-lost-B',
+          attemptCount: 2,
+        },
+      ]);
+      expect(takeover.claimed[0].activeRunId).not.toBe(original?.activeRunId);
+      releaseGate();
+      await waitFor(async () => callbackReturned);
+      await sleep(200);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-lost-B',
+        attemptCount: 2,
+        activeRunId: takeover.claimed[0].activeRunId,
+      });
+      expect(settled).toMatchObject([
+        {
+          id: expired.invocationId,
+          status: 'failed',
+          lastErrorCode: 'lease_expired',
+        },
+      ]);
     } finally {
       releaseGate();
       await worker.stop();
