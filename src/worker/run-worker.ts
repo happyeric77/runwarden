@@ -13,7 +13,6 @@ import type { DatabaseHandle } from '../db/client.js';
 import { insertPolicyDecision } from '../db/repositories/decisions.js';
 import {
   claimInvocations,
-  failExhaustedLeaseInvocations,
   getInvocationRowById,
   heartbeatInvocation,
   markInvocationAwaitingApproval,
@@ -266,15 +265,15 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     while (!stopped) {
       let claimed: InvocationRow[] = [];
       try {
-        const exhausted = await failExhaustedLeaseInvocations(db);
-        for (const exhaustedRow of exhausted) {
-          await internals?.notifyInvocationSettled?.(toRecord(exhaustedRow));
-        }
-        claimed = await claimInvocations(db, workerId, {
+        const result = await claimInvocations(db, workerId, {
           leaseTimeoutMs,
           // Execution is serial, so only claim work we can heartbeat now.
           maxBatchSize: 1,
         });
+        claimed = result.claimed;
+        for (const exhaustedRow of result.exhausted) {
+          await internals?.notifyInvocationSettled?.(toRecord(exhaustedRow));
+        }
       } catch {
         await sleep(pollIdleMs);
         continue;

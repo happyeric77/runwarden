@@ -73,7 +73,7 @@ describe('runWorker', () => {
       scope: 'scope-recovery',
       prompt: 'survive a crash',
     });
-    const claimed = await claimInvocations(handle.db, 'worker-crashed', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-crashed', {
       leaseTimeoutMs: 400,
       maxBatchSize: 1,
     });
@@ -1160,7 +1160,7 @@ describe('invocation settled callbacks', () => {
       maxAttempts: 1,
     });
     // Simulate a worker that claims the invocation and dies mid-run.
-    const claimed = await claimInvocations(handle.db, 'worker-doomed', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-doomed', {
       leaseTimeoutMs: 400,
       maxBatchSize: 1,
     });
@@ -1268,6 +1268,77 @@ describe('invocation settled callbacks', () => {
       lastErrorCode: 'execution_failed',
     });
     await stopped;
+  });
+
+  it('notifies for an invocation exhausted by a claim while another notification is blocked', async () => {
+    const settled: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Never runs.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: async (invocation) => {
+        settled.push(invocation);
+        if (settled.length === 1) {
+          await gate;
+        }
+      },
+    });
+    const first = await runtime.enqueue({
+      scope: 'settled-claim-race',
+      prompt: 'First to expire',
+      maxAttempts: 1,
+    });
+    const doomedFirst = await claimInvocations(handle.db, 'worker-doomed', {
+      leaseTimeoutMs: 300,
+      maxBatchSize: 1,
+    });
+    expect(doomedFirst.claimed.map((row) => String(row.id))).toContain(
+      first.invocationId,
+    );
+    await sleep(500);
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      // The worker's first claim exhausts the first invocation and then
+      // blocks inside its settled notification.
+      await waitFor(async () => settled.length === 1);
+      const second = await runtime.enqueue({
+        scope: 'settled-claim-race',
+        prompt: 'Expires during the blocked notification',
+        maxAttempts: 1,
+      });
+      await claimInvocations(handle.db, 'worker-doomed', {
+        leaseTimeoutMs: 300,
+        maxBatchSize: 1,
+      });
+      await sleep(500);
+      releaseGate();
+      await waitFor(async () => settled.length === 2);
+      await sleep(200);
+      expect(settled).toHaveLength(2);
+      expect(settled[0]).toMatchObject({
+        id: first.invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+      expect(settled[1]).toMatchObject({
+        id: second.invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+    } finally {
+      releaseGate();
+      await worker.stop();
+    }
   });
 });
 
