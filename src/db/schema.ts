@@ -11,8 +11,11 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-import type { PolicyDecisionKind, PolicyRule } from '../contracts/policy';
-import type { InvocationInput, InvocationStatus } from '../contracts/runtime';
+import type { PolicyDecisionKind, PolicyRule } from '../contracts/policy.js';
+import type {
+  InvocationInput,
+  InvocationStatus,
+} from '../contracts/runtime.js';
 
 export const runtimeSchema = pgSchema('agent_runtime');
 

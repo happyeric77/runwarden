@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { FakeAgentRuntime } from './fake-runtime';
+import { FakeAgentRuntime } from './fake-runtime.js';
 
 describe('FakeAgentRuntime', () => {
   it('records neutral invocations and returns a deterministic result', async () => {

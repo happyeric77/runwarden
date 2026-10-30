@@ -251,6 +251,7 @@ pnpm test              # unit tests
 pnpm test:integration  # real Postgres via embedded-postgres
 pnpm typecheck
 pnpm format:check
+pnpm build             # compile src to dist (what npm publishes)
 pnpm demo              # in-process governed invocation, no database
 ```
 

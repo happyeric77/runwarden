@@ -1,6 +1,6 @@
-import type { PolicyDecision } from '../../contracts/policy';
-import type { Database } from '../client';
-import { policyDecisions } from '../schema';
+import type { PolicyDecision } from '../../contracts/policy.js';
+import type { Database } from '../client.js';
+import { policyDecisions } from '../schema.js';
 
 export async function insertPolicyDecision(
   db: Database,

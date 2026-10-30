@@ -2,13 +2,13 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { RUN_ID_HEADER } from '../brand';
-import { AgentRuntimeError } from '../contracts/errors';
+import { RUN_ID_HEADER } from '../brand.js';
+import { AgentRuntimeError } from '../contracts/errors.js';
 import type {
   PolicyDecision,
   RuntimePolicies,
   ToolDefinition,
-} from '../contracts/policy';
+} from '../contracts/policy.js';
 import type {
   McpToolClient,
   NeutralMessage,
@@ -16,11 +16,11 @@ import type {
   RuntimeMetrics,
   ToolCallAuditEvent,
   ToolCallAuditSink,
-} from '../contracts/runtime';
-import { AiSdkNativeRuntime } from './ai-sdk-runtime';
-import { deriveToolCallIdempotencyKey } from './canonical-json';
-import { openAiCompatible } from './model';
-import { PolicyEngine } from './policy-engine';
+} from '../contracts/runtime.js';
+import { AiSdkNativeRuntime } from './ai-sdk-runtime.js';
+import { deriveToolCallIdempotencyKey } from './canonical-json.js';
+import { openAiCompatible } from './model.js';
+import { PolicyEngine } from './policy-engine.js';
 
 const invocation: RuntimeInvocationInput = {
   scope: 'scope-a',

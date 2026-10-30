@@ -6,9 +6,9 @@ import {
   IDEMPOTENCY_KEY_META_KEY,
   RUN_ID_HEADER,
   RUNTIME_NAME,
-} from '../brand';
-import { AgentRuntimeError } from '../contracts/errors';
-import type { McpToolClient, McpToolSession } from '../contracts/runtime';
+} from '../brand.js';
+import { AgentRuntimeError } from '../contracts/errors.js';
+import type { McpToolClient, McpToolSession } from '../contracts/runtime.js';
 
 export interface NativeMcpClientConfig {
   endpoint: string;

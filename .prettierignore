@@ -1,3 +1,4 @@
 # drizzle-kit generated metadata; reformatting it would churn future diffs.
 migrations/meta/
 pnpm-lock.yaml
+dist/

@@ -1,7 +1,7 @@
-import { AgentRuntimeError } from '../contracts/errors';
-import type { PolicyDecision, RuntimePolicies } from '../contracts/policy';
-import type { PendingToolCall } from '../contracts/runtime';
-import { canonicalJson } from './canonical-json';
+import { AgentRuntimeError } from '../contracts/errors.js';
+import type { PolicyDecision, RuntimePolicies } from '../contracts/policy.js';
+import type { PendingToolCall } from '../contracts/runtime.js';
+import { canonicalJson } from './canonical-json.js';
 
 const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';

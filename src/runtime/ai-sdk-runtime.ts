@@ -10,12 +10,12 @@ import {
 } from 'ai';
 import { z } from 'zod';
 
-import { AgentRuntimeError } from '../contracts/errors';
+import { AgentRuntimeError } from '../contracts/errors.js';
 import type {
   PolicyDecision,
   RuntimePolicies,
   ToolDefinition,
-} from '../contracts/policy';
+} from '../contracts/policy.js';
 import type {
   AgentRuntime,
   HistoryLoader,
@@ -27,9 +27,9 @@ import type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
-} from '../contracts/runtime';
-import { deriveToolCallIdempotencyKey } from './canonical-json';
-import { PolicyEngine, type ParsedToolCall } from './policy-engine';
+} from '../contracts/runtime.js';
+import { deriveToolCallIdempotencyKey } from './canonical-json.js';
+import { PolicyEngine, type ParsedToolCall } from './policy-engine.js';
 
 const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
