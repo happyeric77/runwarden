@@ -2,28 +2,28 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { AgentRuntimeError } from '../contracts/errors';
-import type { PolicyDecision } from '../contracts/policy';
+import { AgentRuntimeError } from '../contracts/errors.js';
+import type { PolicyDecision } from '../contracts/policy.js';
 import type {
   McpToolClient,
   ToolCallAuditEvent,
   ToolCallAuditSink,
-} from '../contracts/runtime';
-import { createDb, type DatabaseHandle } from '../db/client';
-import { initDb } from '../db/init';
+} from '../contracts/runtime.js';
+import { createDb, type DatabaseHandle } from '../db/client.js';
+import { initDb } from '../db/init.js';
 import {
   claimInvocations,
   enqueueInvocation,
   getInvocationRowById,
-} from '../db/repositories/invocations';
+} from '../db/repositories/invocations.js';
 import {
   startTestPostgres,
   waitFor,
   type TestPostgres,
-} from '../db/test-postgres';
-import { defineRuntime, RUNTIME_INTERNALS } from '../define-runtime';
-import { FakeAgentRuntime } from '../fake-runtime';
-import { runWorker } from './run-worker';
+} from '../db/test-postgres.js';
+import { defineRuntime, RUNTIME_INTERNALS } from '../define-runtime.js';
+import { FakeAgentRuntime } from '../fake-runtime.js';
+import { runWorker } from './run-worker.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1070,7 +1070,7 @@ describe('tool call audits', () => {
       },
       engine: {
         async invoke(
-          input: import('../contracts/runtime').RuntimeInvocationInput,
+          input: import('../contracts/runtime.js').RuntimeInvocationInput,
         ) {
           if (++entered === 2) release();
           await bothRunning;

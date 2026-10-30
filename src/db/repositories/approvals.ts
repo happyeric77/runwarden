@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import { sql } from 'drizzle-orm';
 
-import type { Database } from '../client';
-import type { InvocationRow } from '../schema';
-import { mapRow, toPendingToolCall } from './invocations';
+import type { Database } from '../client.js';
+import type { InvocationRow } from '../schema.js';
+import { mapRow, toPendingToolCall } from './invocations.js';
 
 export async function listAwaitingApprovalRows(
   db: Database,

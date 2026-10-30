@@ -1,16 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 
-import { AgentRuntimeError } from '../contracts/errors';
-import type { PolicyDecision } from '../contracts/policy';
+import { AgentRuntimeError } from '../contracts/errors.js';
+import type { PolicyDecision } from '../contracts/policy.js';
 import type {
   AgentRuntime,
   InvocationRecord,
   InvocationResult,
   PendingToolCall,
-} from '../contracts/runtime';
-import type { DatabaseHandle } from '../db/client';
-import { insertPolicyDecision } from '../db/repositories/decisions';
+} from '../contracts/runtime.js';
+import type { DatabaseHandle } from '../db/client.js';
+import { insertPolicyDecision } from '../db/repositories/decisions.js';
 import {
   claimInvocations,
   heartbeatInvocation,
@@ -19,13 +19,13 @@ import {
   markInvocationSucceeded,
   toPendingToolCall,
   toRecord,
-} from '../db/repositories/invocations';
+} from '../db/repositories/invocations.js';
 import {
   claimToolCallAudit,
   completeToolCallAudit,
-} from '../db/repositories/tool-call-audits';
-import type { InvocationRow } from '../db/schema';
-import { RUNTIME_INTERNALS, type RuntimeInternals } from '../define-runtime';
+} from '../db/repositories/tool-call-audits.js';
+import type { InvocationRow } from '../db/schema.js';
+import { RUNTIME_INTERNALS, type RuntimeInternals } from '../define-runtime.js';
 
 export interface RunWorkerOptions {
   runtime: {

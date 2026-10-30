@@ -1,6 +1,10 @@
 {
+  "author": "Eric Lee",
   "bin": {
-    "runwarden": "./src/cli.ts"
+    "runwarden": "./dist/cli.js"
+  },
+  "bugs": {
+    "url": "https://github.com/happyeric77/runwarden/issues"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.60",
@@ -27,12 +31,29 @@
   },
   "exports": {
     ".": {
-      "default": "./src/index.ts",
-      "types": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
+  "files": [
+    "assets",
+    "dist",
+    "migrations"
+  ],
+  "homepage": "https://github.com/happyeric77/runwarden#readme",
+  "keywords": [
+    "agent",
+    "ai",
+    "audit",
+    "durable",
+    "mcp",
+    "policy",
+    "postgres",
+    "runtime",
+    "typescript"
+  ],
   "license": "MIT",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "name": "runwarden",
   "packageManager": "pnpm@10.34.9",
   "pnpm": {
@@ -48,32 +69,38 @@
     ]
   },
   "prettier": {
-    "printWidth": 80,
-    "semi": true,
-    "singleQuote": true,
-    "trailingComma": "all",
-    "plugins": [
-      "@ianvs/prettier-plugin-sort-imports"
-    ],
     "importOrder": [
       "<BUILTIN_MODULES>",
       "",
       "<THIRD_PARTY_MODULES>",
       "",
       "^[./]"
-    ]
+    ],
+    "plugins": [
+      "@ianvs/prettier-plugin-sort-imports"
+    ],
+    "printWidth": 80,
+    "semi": true,
+    "singleQuote": true,
+    "trailingComma": "all"
   },
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/happyeric77/runwarden.git"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "demo": "tsx examples/governed-invocation.ts",
     "format": "prettier --write '**/*.{ts,json,md}'",
     "format:check": "prettier --check '**/*.{ts,json,md}'",
+    "prepack": "npm run build",
     "quickstart": "tsx examples/quickstart/main.ts",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit"
   },
+  "sideEffects": false,
   "type": "module",
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "version": "0.1.0"
 }

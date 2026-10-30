@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 
-import type { Database } from '../client';
+import type { Database } from '../client.js';
 
 export interface ToolCallAuditClaim {
   invocationId: string;

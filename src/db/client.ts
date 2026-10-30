@@ -1,7 +1,7 @@
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 
-import * as schema from './schema';
+import * as schema from './schema.js';
 
 export type Database = NodePgDatabase<typeof schema>;
 
@@ -27,5 +27,10 @@ class DbHandle implements DatabaseHandle {
 
 export function createDb(connectionString: string): DatabaseHandle {
   const pool = new Pool({ connectionString });
+  pool.on('error', (error) => {
+    // An idle client whose server went away must not crash the host.
+    if (error.message.includes('terminating connection')) return;
+    console.error('runwarden: database pool error', error);
+  });
   return new DbHandle(drizzle(pool, { schema }), pool);
 }

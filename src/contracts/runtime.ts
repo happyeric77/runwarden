@@ -1,4 +1,4 @@
-import type { AgentRuntimeError } from './errors';
+import type { AgentRuntimeError } from './errors.js';
 
 export interface InvocationInput {
   scope: string;

@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createDb, type DatabaseHandle } from './client';
-import { initDb } from './init';
-import { resolveInvocationApproval } from './repositories/approvals';
+import { createDb, type DatabaseHandle } from './client.js';
+import { initDb } from './init.js';
+import { resolveInvocationApproval } from './repositories/approvals.js';
 import {
   claimInvocations,
   enqueueInvocation,
@@ -11,17 +11,17 @@ import {
   markInvocationAwaitingApproval,
   markInvocationFailed,
   markInvocationSucceeded,
-} from './repositories/invocations';
+} from './repositories/invocations.js';
 import {
   heartbeatWorkerLease,
   releaseWorkerLease,
   tryAcquireWorkerLease,
-} from './repositories/leases';
+} from './repositories/leases.js';
 import {
   claimToolCallAudit,
   completeToolCallAudit,
-} from './repositories/tool-call-audits';
-import { startTestPostgres, type TestPostgres } from './test-postgres';
+} from './repositories/tool-call-audits.js';
+import { startTestPostgres, type TestPostgres } from './test-postgres.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

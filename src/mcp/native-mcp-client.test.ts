@@ -9,8 +9,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { IDEMPOTENCY_KEY_META_KEY, RUN_ID_HEADER } from '../brand';
-import { NativeMcpClient } from './native-mcp-client';
+import { IDEMPOTENCY_KEY_META_KEY, RUN_ID_HEADER } from '../brand.js';
+import { NativeMcpClient } from './native-mcp-client.js';
 
 const closers: Array<() => Promise<void>> = [];
 

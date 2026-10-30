@@ -1,6 +1,6 @@
-#!/usr/bin/env tsx
-import { createDb } from './db/client';
-import { initDb } from './db/init';
+#!/usr/bin/env node
+import { createDb } from './db/client.js';
+import { initDb } from './db/init.js';
 
 const [command] = process.argv.slice(2);
 

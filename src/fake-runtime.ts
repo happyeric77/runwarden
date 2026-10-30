@@ -2,7 +2,7 @@ import type {
   AgentRuntime,
   InvocationResult,
   RuntimeInvocationInput,
-} from './contracts/runtime';
+} from './contracts/runtime.js';
 
 export type FakeAgentRuntimeResultFactory = (
   input: RuntimeInvocationInput,

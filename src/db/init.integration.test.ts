@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createDb, type DatabaseHandle } from './client';
-import { initDb } from './init';
-import { startTestPostgres, type TestPostgres } from './test-postgres';
+import { createDb, type DatabaseHandle } from './client.js';
+import { initDb } from './init.js';
+import { startTestPostgres, type TestPostgres } from './test-postgres.js';
 
 describe('initDb', () => {
   let pg: TestPostgres;

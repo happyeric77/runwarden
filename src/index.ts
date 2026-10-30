@@ -1,24 +1,24 @@
-export { defineRuntime } from './define-runtime';
+export { defineRuntime } from './define-runtime.js';
 export type {
   ApprovalActionOptions,
   DatabaseHandle,
   DefineRuntimeOptions,
   InvokeOptions,
   Runtime,
-} from './define-runtime';
+} from './define-runtime.js';
 
-export { createDb } from './db/client';
-export { initDb, type InitOptions, type InitResult } from './db/init';
+export { createDb } from './db/client.js';
+export { initDb, type InitOptions, type InitResult } from './db/init.js';
 export {
   runWorker,
   type RunWorkerOptions,
   type WorkerHandle,
-} from './worker/run-worker';
+} from './worker/run-worker.js';
 
 export {
   AgentRuntimeError,
   type AgentRuntimeErrorKind,
-} from './contracts/errors';
+} from './contracts/errors.js';
 
 export type {
   AgentRuntime,
@@ -36,7 +36,7 @@ export type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
-} from './contracts/runtime';
+} from './contracts/runtime.js';
 
 export type {
   McpServerConfig,
@@ -45,16 +45,20 @@ export type {
   PolicyRule,
   RuntimePolicies,
   ToolDefinition,
-} from './contracts/policy';
+} from './contracts/policy.js';
 
 export {
   openAiCompatible,
   type OpenAiCompatibleModelConfig,
-} from './runtime/model';
+} from './runtime/model.js';
 export {
   NativeMcpClient,
   type NativeMcpClientConfig,
-} from './mcp/native-mcp-client';
-export { FakeAgentRuntime } from './fake-runtime';
+} from './mcp/native-mcp-client.js';
+export { FakeAgentRuntime } from './fake-runtime.js';
 
-export { RUNTIME_NAME, RUN_ID_HEADER, ERROR_CATEGORY_META_KEY } from './brand';
+export {
+  RUNTIME_NAME,
+  RUN_ID_HEADER,
+  ERROR_CATEGORY_META_KEY,
+} from './brand.js';
