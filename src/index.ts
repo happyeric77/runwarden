@@ -26,6 +26,7 @@ export type {
   InvocationInput,
   InvocationRecord,
   InvocationResult,
+  InvocationSettledListener,
   InvocationStatus,
   McpToolClient,
   McpToolSession,

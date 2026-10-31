@@ -198,7 +198,7 @@ describe('invocation repositories', () => {
       prompt: 'unrelated',
     });
 
-    const claimed = await claimInvocations(handle.db, 'worker-1', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-1', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 25,
     });
@@ -214,7 +214,7 @@ describe('invocation repositories', () => {
       claimed.find((row) => String(row.id) === a1.invocationId)!.activeRunId!,
       { resultText: 'done' },
     );
-    const next = await claimInvocations(handle.db, 'worker-1', {
+    const { claimed: next } = await claimInvocations(handle.db, 'worker-1', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 25,
     });
@@ -226,23 +226,31 @@ describe('invocation repositories', () => {
       scope: 'scope-crash',
       prompt: 'crashy',
     });
-    const claimed = await claimInvocations(handle.db, 'worker-dead', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-dead', {
       leaseTimeoutMs: 300,
       maxBatchSize: 1,
     });
     expect(claimed.map((row) => String(row.id))).toEqual([invocationId]);
 
-    const tooEarly = await claimInvocations(handle.db, 'worker-2', {
-      leaseTimeoutMs: 30_000,
-      maxBatchSize: 25,
-    });
+    const { claimed: tooEarly } = await claimInvocations(
+      handle.db,
+      'worker-2',
+      {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 25,
+      },
+    );
     expect(tooEarly.map((row) => String(row.id))).not.toContain(invocationId);
 
     await sleep(600);
-    const reclaimed = await claimInvocations(handle.db, 'worker-2', {
-      leaseTimeoutMs: 30_000,
-      maxBatchSize: 25,
-    });
+    const { claimed: reclaimed } = await claimInvocations(
+      handle.db,
+      'worker-2',
+      {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 25,
+      },
+    );
     const row = reclaimed.find((entry) => String(entry.id) === invocationId);
     expect(row).toBeDefined();
     expect(row?.attemptCount).toBe(2);
@@ -254,7 +262,7 @@ describe('invocation repositories', () => {
       scope: 'scope-heartbeat',
       prompt: 'beat',
     });
-    const claimed = await claimInvocations(handle.db, 'worker-owner', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-owner', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 25,
     });
@@ -276,7 +284,9 @@ describe('invocation repositories', () => {
       prompt: 'fail',
       maxAttempts: 2,
     });
-    const [first] = await claimInvocations(handle.db, 'failure-worker', {
+    const {
+      claimed: [first],
+    } = await claimInvocations(handle.db, 'failure-worker', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });
@@ -290,7 +300,9 @@ describe('invocation repositories', () => {
       0,
     );
     expect(retry?.status).toBe('pending');
-    const [last] = await claimInvocations(handle.db, 'failure-worker', {
+    const {
+      claimed: [last],
+    } = await claimInvocations(handle.db, 'failure-worker', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });
@@ -325,7 +337,7 @@ describe('invocation repositories', () => {
       maxBatchSize: 1,
     });
     await sleep(100);
-    const claimed = await claimInvocations(handle.db, 'recovery', {
+    const { claimed } = await claimInvocations(handle.db, 'recovery', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });
@@ -350,12 +362,16 @@ describe('invocation repositories', () => {
       scope: 'scope-fencing',
       prompt: 'fenced',
     });
-    const [old] = await claimInvocations(handle.db, 'reused', {
+    const {
+      claimed: [old],
+    } = await claimInvocations(handle.db, 'reused', {
       leaseTimeoutMs: 40,
       maxBatchSize: 1,
     });
     await sleep(100);
-    const [fresh] = await claimInvocations(handle.db, 'reused', {
+    const {
+      claimed: [fresh],
+    } = await claimInvocations(handle.db, 'reused', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });
@@ -430,7 +446,9 @@ describe('invocation repositories', () => {
         scope: 'race',
         prompt: 'approve',
       });
-      const [row] = await claimInvocations(handle.db, 'approval-worker', {
+      const {
+        claimed: [row],
+      } = await claimInvocations(handle.db, 'approval-worker', {
         leaseTimeoutMs: 30_000,
         maxBatchSize: 1,
       });
@@ -462,10 +480,12 @@ describe('invocation repositories', () => {
           { resolvedBy: 'reviewer', note: 'checked' },
         );
         expect(
-          await claimInvocations(handle.db, 'interleaved', {
-            leaseTimeoutMs: 30_000,
-            maxBatchSize: 1,
-          }),
+          (
+            await claimInvocations(handle.db, 'interleaved', {
+              leaseTimeoutMs: 30_000,
+              maxBatchSize: 1,
+            })
+          ).claimed,
         ).toEqual([]);
         expect(
           await heartbeatInvocation(
@@ -502,7 +522,9 @@ describe('invocation repositories', () => {
           },
         ]);
         // Finish the surviving grant so subsequent claim tests stay isolated.
-        const [claimed] = await claimInvocations(handle.db, 'cleanup', {
+        const {
+          claimed: [claimed],
+        } = await claimInvocations(handle.db, 'cleanup', {
           leaseTimeoutMs: 30_000,
           maxBatchSize: 1,
         });
@@ -529,7 +551,9 @@ describe('invocation repositories', () => {
       maxAttempts: 2,
       orderingKey: 'approval-order',
     });
-    const [row] = await claimInvocations(handle.db, 'approval-retry', {
+    const {
+      claimed: [row],
+    } = await claimInvocations(handle.db, 'approval-retry', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });
@@ -565,10 +589,12 @@ describe('invocation repositories', () => {
       orderingKey: 'approval-order',
     });
     expect(
-      await claimInvocations(handle.db, 'blocked', {
-        leaseTimeoutMs: 30_000,
-        maxBatchSize: 1,
-      }),
+      (
+        await claimInvocations(handle.db, 'blocked', {
+          leaseTimeoutMs: 30_000,
+          maxBatchSize: 1,
+        })
+      ).claimed,
     ).toEqual([]);
     await handle.pool.query(
       `create function agent_runtime.fail_resolution() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
@@ -599,7 +625,9 @@ describe('invocation repositories', () => {
     }
     await resolveInvocationApproval(handle.db, invocationId, 'approved');
     for (const status of ['pending', 'failed']) {
-      const [claimed] = await claimInvocations(handle.db, 'approval-retry', {
+      const {
+        claimed: [claimed],
+      } = await claimInvocations(handle.db, 'approval-retry', {
         leaseTimeoutMs: 30_000,
         maxBatchSize: 1,
       });
@@ -617,7 +645,9 @@ describe('invocation repositories', () => {
         status === 'pending' ? pending : null,
       );
     }
-    const [next] = await claimInvocations(handle.db, 'successor', {
+    const {
+      claimed: [next],
+    } = await claimInvocations(handle.db, 'successor', {
       leaseTimeoutMs: 30_000,
       maxBatchSize: 1,
     });

@@ -13,6 +13,7 @@ import type { DatabaseHandle } from '../db/client.js';
 import { insertPolicyDecision } from '../db/repositories/decisions.js';
 import {
   claimInvocations,
+  getInvocationRowById,
   heartbeatInvocation,
   markInvocationAwaitingApproval,
   markInvocationFailed,
@@ -97,7 +98,38 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
 
   let stopped = false;
 
-  async function executeOne(row: InvocationRow): Promise<void> {
+  function guardLease(row: InvocationRow) {
+    let lost = false;
+    async function beat(): Promise<boolean> {
+      try {
+        const owned = await heartbeatInvocation(
+          db,
+          row.id,
+          workerId,
+          row.activeRunId!,
+          leaseTimeoutMs,
+        );
+        if (!owned) lost = true;
+        return owned && !lost;
+      } catch {
+        return false;
+      }
+    }
+    const interval = setInterval(() => void beat(), heartbeatIntervalMs);
+    interval.unref?.();
+    return {
+      beat,
+      get isLost() {
+        return lost;
+      },
+      stop: () => clearInterval(interval),
+    };
+  }
+
+  async function executeOne(
+    row: InvocationRow,
+    lease: ReturnType<typeof guardLease>,
+  ): Promise<void> {
     const record = toRecord(row);
     const auditWrites: Promise<void>[] = [];
     let auditError: unknown;
@@ -153,21 +185,6 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         throw new Error('Tool audit completion lost its dispatch claim');
       auditIds.delete(event.dispatchId);
     });
-    let leaseLost = false;
-    const heartbeat = setInterval(() => {
-      void heartbeatInvocation(
-        db,
-        row.id,
-        workerId,
-        row.activeRunId!,
-        leaseTimeoutMs,
-      )
-        .then((ok) => {
-          if (!ok) leaseLost = true;
-        })
-        .catch(() => undefined);
-    }, heartbeatIntervalMs);
-    heartbeat.unref?.();
     try {
       let result: InvocationResult;
       try {
@@ -189,7 +206,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
             { cause: auditError },
           );
       }
-      if (leaseLost) return;
+      if (lease.isLost) return;
       const marked = await markInvocationSucceeded(
         db,
         row.id,
@@ -202,13 +219,32 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         },
       );
       if (marked) {
+        const settledRecord = await getInvocationRowById(
+          db,
+          String(row.id),
+        ).then(
+          (settledRow) =>
+            settledRow
+              ? toRecord(settledRow)
+              : {
+                  ...record,
+                  status: 'succeeded' as const,
+                  resultText: result.text,
+                },
+          () => ({
+            ...record,
+            status: 'succeeded' as const,
+            resultText: result.text,
+          }),
+        );
+        await internals?.notifyInvocationSettled?.(settledRecord);
         await options.onSucceeded?.(
           { ...record, status: 'succeeded', resultText: result.text },
           result,
         );
       }
     } catch (error) {
-      if (leaseLost) return;
+      if (lease.isLost) return;
       const agentError = toAgentError(error);
       if (errorCode(agentError) === 'approval_required') {
         const pendingToolCall = pendingFromError(agentError);
@@ -233,35 +269,46 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         retryDelayMs,
       );
       if (updated?.status === 'failed') {
+        await internals?.notifyInvocationSettled?.(toRecord(updated));
         await options.onFailed?.(toRecord(updated), agentError);
       }
-    } finally {
-      clearInterval(heartbeat);
     }
   }
 
   const loop = (async () => {
     while (!stopped) {
-      let claimed: InvocationRow[] = [];
+      let claimed: {
+        row: InvocationRow;
+        lease: ReturnType<typeof guardLease>;
+      }[] = [];
       try {
-        claimed = await claimInvocations(db, workerId, {
-          leaseTimeoutMs,
-          // Execution is serial, so only claim work we can heartbeat now.
-          maxBatchSize: 1,
-        });
-      } catch {
-        await sleep(pollIdleMs);
-        continue;
+        try {
+          const result = await claimInvocations(db, workerId, {
+            leaseTimeoutMs,
+            // Execution is serial, so only claim work we can heartbeat now.
+            maxBatchSize: 1,
+          });
+          claimed = result.claimed.map((row) => ({
+            row,
+            lease: guardLease(row),
+          }));
+          for (const exhaustedRow of result.exhausted) {
+            await internals?.notifyInvocationSettled?.(toRecord(exhaustedRow));
+          }
+        } catch {
+          await sleep(pollIdleMs);
+          continue;
+        }
+        for (const { row, lease } of claimed) {
+          if (stopped) break;
+          if (!(await lease.beat())) continue;
+          if (stopped) break;
+          await executeOne(row, lease);
+        }
+      } finally {
+        for (const { lease } of claimed) lease.stop();
       }
-      if (claimed.length === 0) {
-        await sleep(pollIdleMs);
-        continue;
-      }
-      for (const row of claimed) {
-        if (stopped) break;
-        await executeOne(row);
-      }
-      await sleep(pollActiveMs);
+      await sleep(claimed.length === 0 ? pollIdleMs : pollActiveMs);
     }
   })();
 

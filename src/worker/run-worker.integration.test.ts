@@ -1,10 +1,12 @@
 import { MockLanguageModelV4 } from 'ai/test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { AgentRuntimeError } from '../contracts/errors.js';
 import type { PolicyDecision } from '../contracts/policy.js';
 import type {
+  InvocationRecord,
   McpToolClient,
   ToolCallAuditEvent,
   ToolCallAuditSink,
@@ -72,7 +74,7 @@ describe('runWorker', () => {
       scope: 'scope-recovery',
       prompt: 'survive a crash',
     });
-    const claimed = await claimInvocations(handle.db, 'worker-crashed', {
+    const { claimed } = await claimInvocations(handle.db, 'worker-crashed', {
       leaseTimeoutMs: 400,
       maxBatchSize: 1,
     });
@@ -862,6 +864,680 @@ describe('approval state machine', () => {
       ).toEqual([ids[0]]);
       for (const id of ids) await runtime.rejectInvocation(id);
     } finally {
+      await worker.stop();
+    }
+  });
+});
+
+describe('invocation settled callbacks', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function textModel(text: string) {
+    return new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text', text }],
+        finishReason: { unified: 'stop', raw: 'stop' } as const,
+        usage: {
+          inputTokens: {
+            total: 1,
+            noCache: 1,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+        },
+        warnings: [],
+      }),
+    });
+  }
+
+  it('fires once with the final record when an invocation succeeds', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('All done.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-success',
+        prompt: 'Say hi',
+      });
+      await waitFor(async () => settled.length === 1);
+      await sleep(200);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        scope: 'settled-success',
+        status: 'succeeded',
+        resultText: 'All done.',
+      });
+      expect(settled[0]?.completedAt).toBeTruthy();
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires once when an invocation fails its final attempt', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => {
+          throw new Error('provider exploded');
+        },
+      }),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-failure',
+        prompt: 'Boom',
+        maxAttempts: 1,
+      });
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+      });
+      expect(settled[0]?.lastErrorCode).toBeTruthy();
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('isolates throwing settled callbacks on rejection and approved completion', async () => {
+    const settled: InvocationRecord[] = [];
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool() {
+            return JSON.stringify([
+              { type: 'text', text: 'Refund issued for order 42.' },
+            ]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        });
+        if (promptText.includes('Refund issued')) {
+          return finish([{ type: 'text', text: 'Refund completed.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-refund',
+            toolName: 'billing__refund',
+            input: JSON.stringify({
+              amountCents: 5000,
+              reason: 'duplicate charge',
+            }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'billing__refund',
+          description: 'Refund a charge to the original payment method.',
+          inputSchema: z.object({
+            amountCents: z.number().int().positive(),
+            reason: z.string().min(1),
+          }),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are a helpful billing assistant.',
+      loadHistory: async () => [],
+      policies: { requireApproval: ['billing__refund'] },
+      onInvocationSettled: async (invocation) => {
+        settled.push(invocation);
+        throw new Error('observer bug');
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const rejected = await runtime.enqueue({
+        scope: 'settled-cancelled',
+        prompt: 'Refund order 42',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(rejected.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      expect(settled).toHaveLength(0);
+      await runtime.rejectInvocation(rejected.invocationId);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: rejected.invocationId,
+        status: 'cancelled',
+        lastErrorCode: 'approval_rejected',
+      });
+
+      const approved = await runtime.enqueue({
+        scope: 'settled-approved',
+        prompt: 'Refund order 42',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(approved.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      await runtime.approveInvocation(approved.invocationId);
+      const result = await runtime.waitForInvocation(approved.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Refund completed.');
+      await waitFor(async () => settled.length === 2);
+      await sleep(200);
+      expect(settled).toHaveLength(2);
+      expect(settled[1]).toMatchObject({
+        id: approved.invocationId,
+        status: 'succeeded',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('a throwing settled callback does not affect the invocation', async () => {
+    let callbackCount = 0;
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Fine.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: () => {
+        callbackCount++;
+        throw new Error('observer bug');
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-throwing',
+        prompt: 'Say hi',
+      });
+      const result = await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Fine.');
+      const next = await runtime.enqueue({
+        scope: 'settled-throwing',
+        prompt: 'Keep working',
+      });
+      await runtime.waitForInvocation(next.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      await waitFor(async () => callbackCount === 2);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires with failed when the final attempt lease expires', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Never runs.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const { invocationId } = await runtime.enqueue({
+      scope: 'settled-lease-expired',
+      prompt: 'Claimed by a worker that dies',
+      maxAttempts: 1,
+    });
+    // Simulate a worker that claims the invocation and dies mid-run.
+    const { claimed } = await claimInvocations(handle.db, 'worker-doomed', {
+      leaseTimeoutMs: 400,
+      maxBatchSize: 1,
+    });
+    expect(claimed.map((row) => String(row.id))).toContain(invocationId);
+    await sleep(700);
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires settled even when the worker onSucceeded callback throws', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Done.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      onSucceeded: () => {
+        throw new Error('legacy hook bug');
+      },
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'settled-legacy-success-throws',
+        prompt: 'Say hi',
+      });
+      await waitFor(async () => settled.length === 1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'succeeded',
+        resultText: 'Done.',
+      });
+      const record = await runtime.getInvocation(invocationId);
+      expect(record?.status).toBe('succeeded');
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fires settled even when the worker onFailed callback throws', async () => {
+    const settled: InvocationRecord[] = [];
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => {
+          await sleep(300);
+          throw new Error('provider exploded');
+        },
+      }),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: (invocation) => {
+        settled.push(invocation);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 10,
+      onFailed: () => {
+        throw new Error('legacy hook bug');
+      },
+    });
+    const { invocationId } = await runtime.enqueue({
+      scope: 'settled-legacy-failure-throws',
+      prompt: 'Boom',
+      maxAttempts: 1,
+    });
+    await waitFor(
+      async () =>
+        (await runtime.getInvocation(invocationId))?.status === 'running',
+    );
+    // Attach the stop handler before the legacy hook can throw: its throw
+    // rejecting the worker loop is pre-existing behavior under test here
+    // only for the settled notification surviving it.
+    const stopped = worker.stop().catch(() => 'loop rejected');
+    await waitFor(async () => settled.length === 1);
+    expect(settled[0]).toMatchObject({
+      id: invocationId,
+      status: 'failed',
+      lastErrorCode: 'execution_failed',
+    });
+    await stopped;
+  });
+
+  it('notifies for an invocation exhausted by a claim while another notification is blocked', async () => {
+    const settled: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Never runs.'),
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      onInvocationSettled: async (invocation) => {
+        settled.push(invocation);
+        if (settled.length === 1) {
+          await gate;
+        }
+      },
+    });
+    const first = await runtime.enqueue({
+      scope: 'settled-claim-race',
+      prompt: 'First to expire',
+      maxAttempts: 1,
+    });
+    const doomedFirst = await claimInvocations(handle.db, 'worker-doomed', {
+      leaseTimeoutMs: 300,
+      maxBatchSize: 1,
+    });
+    expect(doomedFirst.claimed.map((row) => String(row.id))).toContain(
+      first.invocationId,
+    );
+    await sleep(500);
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      // The worker's first claim exhausts the first invocation and then
+      // blocks inside its settled notification.
+      await waitFor(async () => settled.length === 1);
+      const second = await runtime.enqueue({
+        scope: 'settled-claim-race',
+        prompt: 'Expires during the blocked notification',
+        maxAttempts: 1,
+      });
+      await claimInvocations(handle.db, 'worker-doomed', {
+        leaseTimeoutMs: 300,
+        maxBatchSize: 1,
+      });
+      await sleep(500);
+      releaseGate();
+      await waitFor(async () => settled.length === 2);
+      await sleep(200);
+      expect(settled).toHaveLength(2);
+      expect(settled[0]).toMatchObject({
+        id: first.invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+      expect(settled[1]).toMatchObject({
+        id: second.invocationId,
+        status: 'failed',
+        lastErrorCode: 'lease_expired',
+      });
+    } finally {
+      releaseGate();
+      await worker.stop();
+    }
+  });
+
+  it('keeps the claimed lease alive while an exhausted callback is blocked', async () => {
+    const expired = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-alive',
+      prompt: 'Expired work',
+      maxAttempts: 1,
+    });
+    await claimInvocations(handle.db, 'dead', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    await handle.pool.query(
+      `update agent_runtime.invocations set lease_expires_at = now() - interval '1 second' where id = $1`,
+      [expired.invocationId],
+    );
+    const pending = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-alive',
+      prompt: 'Only A should execute',
+    });
+    const settledA: InvocationRecord[] = [];
+    const settledB: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtimeA = defineRuntime({
+      db: handle,
+      model: textModel('A completed.'),
+      onInvocationSettled: async (record) => {
+        settledA.push(record);
+        if (record.id === expired.invocationId) await gate;
+      },
+    });
+    const runtimeB = defineRuntime({
+      db: handle,
+      model: textModel('B must not execute.'),
+      onInvocationSettled: (record) => {
+        settledB.push(record);
+      },
+    });
+    const invokeA = vi.spyOn(runtimeA.engine, 'invoke');
+    const invokeB = vi.spyOn(runtimeB.engine, 'invoke');
+    const workerA = runWorker({
+      runtime: runtimeA,
+      db: handle,
+      workerId: 'guard-alive-A',
+      leaseTimeoutMs: 300,
+      heartbeatIntervalMs: 25,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+    });
+    let workerB: ReturnType<typeof runWorker> | undefined;
+    try {
+      await waitFor(async () => settledA.length === 1);
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-alive-A',
+        attemptCount: 1,
+      });
+      workerB = runWorker({
+        runtime: runtimeB,
+        db: handle,
+        workerId: 'guard-alive-B',
+        leaseTimeoutMs: 300,
+        heartbeatIntervalMs: 25,
+        pollIdleMs: 10,
+        pollActiveMs: 10,
+      });
+      await sleep(1_000);
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-alive-A',
+        attemptCount: 1,
+      });
+      expect(invokeA).not.toHaveBeenCalled();
+      expect(invokeB).not.toHaveBeenCalled();
+      expect(settledB).toEqual([]);
+      releaseGate();
+      await waitFor(async () => settledA.length === 2);
+      expect(invokeA).toHaveBeenCalledTimes(1);
+      expect(invokeB).not.toHaveBeenCalled();
+      expect(settledA).toMatchObject([
+        {
+          id: expired.invocationId,
+          status: 'failed',
+          lastErrorCode: 'lease_expired',
+        },
+        { id: pending.invocationId, status: 'succeeded', attemptCount: 1 },
+      ]);
+      expect(settledB).toEqual([]);
+    } finally {
+      releaseGate();
+      await Promise.all([workerA.stop(), workerB?.stop()]);
+    }
+  });
+
+  it('does not dispatch claimed work taken over during a blocked exhausted callback', async () => {
+    const expired = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-lost',
+      prompt: 'Expired work',
+      maxAttempts: 1,
+    });
+    await claimInvocations(handle.db, 'dead', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    await handle.pool.query(
+      `update agent_runtime.invocations set lease_expires_at = now() - interval '1 second' where id = $1`,
+      [expired.invocationId],
+    );
+    const pending = await enqueueInvocation(handle.db, {
+      scope: 'settled-guard-lost',
+      prompt: 'Taken over before dispatch',
+    });
+    const settled: InvocationRecord[] = [];
+    let releaseGate!: () => void;
+    let callbackReturned = false;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model: textModel('Must not execute.'),
+      onInvocationSettled: async (record) => {
+        settled.push(record);
+        if (record.id === expired.invocationId) {
+          await gate;
+          callbackReturned = true;
+        }
+      },
+    });
+    const invoke = vi.spyOn(runtime.engine, 'invoke');
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      workerId: 'guard-lost-A',
+      leaseTimeoutMs: 30_000,
+      // Require the pre-dispatch beat to detect takeover before the interval fires.
+      heartbeatIntervalMs: 60_000,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+    });
+    try {
+      await waitFor(async () => settled.length === 1);
+      const original = await getInvocationRowById(
+        handle.db,
+        pending.invocationId,
+      );
+      expect(original).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-lost-A',
+        attemptCount: 1,
+      });
+      const takeover = await handle.db.transaction(async (tx) => {
+        await tx.execute(sql`
+          update agent_runtime.invocations
+          set lease_expires_at = now() - interval '1 second'
+          where id = ${Number(pending.invocationId)}
+        `);
+        return claimInvocations(tx, 'guard-lost-B', {
+          leaseTimeoutMs: 30_000,
+          maxBatchSize: 1,
+        });
+      });
+      expect(takeover.claimed).toMatchObject([
+        {
+          id: Number(pending.invocationId),
+          claimedBy: 'guard-lost-B',
+          attemptCount: 2,
+        },
+      ]);
+      expect(takeover.claimed[0].activeRunId).not.toBe(original?.activeRunId);
+      releaseGate();
+      await waitFor(async () => callbackReturned);
+      await sleep(200);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(
+        await getInvocationRowById(handle.db, pending.invocationId),
+      ).toMatchObject({
+        status: 'running',
+        claimedBy: 'guard-lost-B',
+        attemptCount: 2,
+        activeRunId: takeover.claimed[0].activeRunId,
+      });
+      expect(settled).toMatchObject([
+        {
+          id: expired.invocationId,
+          status: 'failed',
+          lastErrorCode: 'lease_expired',
+        },
+      ]);
+    } finally {
+      releaseGate();
       await worker.stop();
     }
   });

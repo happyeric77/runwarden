@@ -116,12 +116,19 @@ export interface ClaimOptions {
   maxBatchSize: number;
 }
 
-// Recovery and exhausted-lease cleanup share the atomic claim statement.
+export interface ClaimResult {
+  claimed: InvocationRow[];
+  exhausted: InvocationRow[];
+}
+
+// Recovery and exhausted-lease cleanup share the atomic claim statement,
+// which also returns the rows it exhausted so callers can observe those
+// terminal transitions.
 export async function claimInvocations(
   db: Database,
   workerId: string,
   options: ClaimOptions,
-): Promise<InvocationRow[]> {
+): Promise<ClaimResult> {
   const result = await db.execute(sql`
     with exhausted as (
       update agent_runtime.invocations
@@ -132,7 +139,7 @@ export async function claimInvocations(
           ${CLEAR_CLAIM}
       where status = 'running' and lease_expires_at < now()
         and attempt_count >= max_attempts
-      returning id
+      returning *
     ), candidate as (
       select inv.id
       from agent_runtime.invocations inv
@@ -161,23 +168,36 @@ export async function claimInvocations(
       order by inv.created_at asc, inv.id asc
       for update skip locked
       limit ${options.maxBatchSize}
+    ), claimed as (
+      update agent_runtime.invocations inv
+      set status = 'running',
+          attempt_count = inv.attempt_count + 1,
+          claimed_at = now(),
+          claimed_by = ${workerId},
+          lease_heartbeat_at = now(),
+          lease_expires_at = now() + (${options.leaseTimeoutMs} * interval '1 millisecond'),
+          started_at = coalesce(inv.started_at, now()),
+          active_run_id = gen_random_uuid(),
+          active_run_registered_at = now(),
+          updated_at = now()
+      from candidate
+      where inv.id = candidate.id
+      returning inv.*
     )
-    update agent_runtime.invocations inv
-    set status = 'running',
-        attempt_count = inv.attempt_count + 1,
-        claimed_at = now(),
-        claimed_by = ${workerId},
-        lease_heartbeat_at = now(),
-        lease_expires_at = now() + (${options.leaseTimeoutMs} * interval '1 millisecond'),
-        started_at = coalesce(inv.started_at, now()),
-        active_run_id = gen_random_uuid(),
-        active_run_registered_at = now(),
-        updated_at = now()
-    from candidate
-    where inv.id = candidate.id
-    returning inv.*
+    select 'claimed' as transition, claimed.* from claimed
+    union all
+    select 'exhausted' as transition, exhausted.* from exhausted
   `);
-  return (result.rows as Record<string, unknown>[]).map(mapRow);
+  const claimed: InvocationRow[] = [];
+  const exhausted: InvocationRow[] = [];
+  for (const raw of result.rows as Record<string, unknown>[]) {
+    if (raw.transition === 'exhausted') {
+      exhausted.push(mapRow(raw));
+    } else {
+      claimed.push(mapRow(raw));
+    }
+  }
+  return { claimed, exhausted };
 }
 
 export async function heartbeatInvocation(
