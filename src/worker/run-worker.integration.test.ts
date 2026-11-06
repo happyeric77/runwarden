@@ -1848,8 +1848,9 @@ describe('caller run identity', () => {
         return record?.status === 'awaiting_approval';
       });
       const parked = await getInvocationRowById(handle.db, invocationId);
-      expect(parked?.activeRunId).toBeTruthy();
-      expect(minted).toContain(parked?.activeRunId);
+      const parkedRunId = parked?.activeRunId ?? '';
+      expect(parkedRunId).not.toBe('');
+      expect(minted).toContain(parkedRunId);
 
       await runtime.approveInvocation(invocationId);
       const result = await runtime.waitForInvocation(invocationId, {
@@ -1858,10 +1859,16 @@ describe('caller run identity', () => {
       });
       expect(result.text).toBe('Refund done.');
       const settled = await getInvocationRowById(handle.db, invocationId);
-      expect(settled?.activeRunId).toBeTruthy();
-      expect(minted).toContain(settled?.activeRunId);
-      expect(settled?.activeRunId).not.toBe(parked?.activeRunId);
-      expect(openedRunIds).toEqual([settled?.activeRunId]);
+      const settledRunId = settled?.activeRunId ?? '';
+      expect(settledRunId).not.toBe('');
+      expect(minted).toContain(settledRunId);
+      expect(settledRunId).not.toBe(parkedRunId);
+      // The rerun ran under an ID minted after the parked attempt's ID:
+      // the factory's next value, not a reuse of the parked one.
+      expect(minted.indexOf(settledRunId)).toBeGreaterThan(
+        minted.indexOf(parkedRunId),
+      );
+      expect(openedRunIds).toEqual([settledRunId]);
     } finally {
       await worker.stop();
     }
