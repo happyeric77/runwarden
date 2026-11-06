@@ -90,7 +90,7 @@
     "url": "git+https://github.com/happyeric77/runwarden.git"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown --config-loader tsx",
     "demo": "tsx examples/governed-invocation.ts",
     "format": "prettier --write '**/*.{ts,json,md}'",
     "format:check": "prettier --check '**/*.{ts,json,md}'",
