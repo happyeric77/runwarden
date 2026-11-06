@@ -53,6 +53,7 @@ export interface RuntimeInternals {
     listener: (event: ToolCallAuditEvent) => Promise<void>,
   ) => () => void;
   notifyInvocationSettled?: (invocation: InvocationRecord) => Promise<void>;
+  generateRunId?: () => string;
 }
 
 export interface DefineRuntimeOptions {
@@ -69,6 +70,7 @@ export interface DefineRuntimeOptions {
   onPolicyDecision?: (decision: PolicyDecision) => void;
   onToolCallAudit?: ToolCallAuditSink;
   onInvocationSettled?: InvocationSettledListener;
+  generateRunId?: () => string;
 }
 
 export interface InvokeOptions {
@@ -162,6 +164,14 @@ function dbRequired(operation: string): AgentRuntimeError {
     'failure',
     `${operation} requires a database: pass createDb() as defineRuntime({ db })`,
     { code: 'db_required' },
+  );
+}
+
+function callerRunIdRejected(): AgentRuntimeError {
+  return new AgentRuntimeError(
+    'failure',
+    'InvocationInput.runId is only honored for direct execution without a database. Durable invocations mint a fresh runId per attempt; use defineRuntime({ generateRunId }) to control how those runIds are generated.',
+    { code: 'caller_run_id_in_durable_mode' },
   );
 }
 
@@ -278,6 +288,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     input: InvocationInput,
     opts?: InvokeOptions,
   ): Promise<InvocationResult> {
+    if (input.runId !== undefined) throw callerRunIdRejected();
     const { invocationId } = await enqueueInvocation(db!.db, input);
     return waitForInvocation(invocationId, opts);
   }
@@ -317,10 +328,11 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           engine.invoke({
             ...input,
             invocationId: randomUUID(),
-            runId: randomUUID(),
+            runId: input.runId ?? randomUUID(),
           }),
     enqueue: async (input) => {
       if (!db) throw dbRequired('enqueue');
+      if (input.runId !== undefined) throw callerRunIdRejected();
       return enqueueInvocation(db.db, input);
     },
     getInvocation: async (id) => {
@@ -350,6 +362,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
         };
       },
       notifyInvocationSettled,
+      generateRunId: options.generateRunId,
     },
   };
 }

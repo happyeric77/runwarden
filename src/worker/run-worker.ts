@@ -277,6 +277,22 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
 
   const loop = (async () => {
     while (!stopped) {
+      // Minted outside the claim error path on purpose: a generateRunId
+      // that throws or returns a non-UUID is a configuration error and
+      // must fail the worker loudly, not spin in the retry loop.
+      let claimRunId: string | undefined;
+      if (internals?.generateRunId) {
+        claimRunId = internals.generateRunId();
+        if (
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+            claimRunId,
+          )
+        ) {
+          throw new Error(
+            `generateRunId must return a UUID string, got: ${claimRunId}`,
+          );
+        }
+      }
       let claimed: {
         row: InvocationRow;
         lease: ReturnType<typeof guardLease>;
@@ -287,6 +303,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
             leaseTimeoutMs,
             // Execution is serial, so only claim work we can heartbeat now.
             maxBatchSize: 1,
+            runId: claimRunId,
           });
           claimed = result.claimed.map((row) => ({
             row,
@@ -311,6 +328,13 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       await sleep(claimed.length === 0 ? pollIdleMs : pollActiveMs);
     }
   })();
+
+  // The loop can reject long before anyone calls stop() (a generateRunId
+  // failure is the first-turn case). Without a handler attached now, Node
+  // treats that as an unhandled rejection and kills the process before
+  // stop() can observe it. Awaiting `loop` in stop() still sees the
+  // rejection; this only marks it handled in the meantime.
+  loop.catch(() => {});
 
   return {
     async stop(): Promise<void> {

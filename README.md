@@ -344,6 +344,33 @@ The end of a quickstart run prints that trail. A typical run:
   tool_call_audit invocation=<id> tool=billing__refund status=succeeded idempotency_key=<prefix>...
 ```
 
+## Run IDs
+
+Every attempt of an invocation carries a run ID. It fences the attempt's
+lease, travels to MCP servers as the `X-Runwarden-Run-Id` header, and is
+stamped on policy decisions and tool call audits, so your own logs and
+systems can correlate with Runwarden's records.
+
+Who generates it depends on how the invocation runs:
+
+- **Direct execution** (`invoke()` on a runtime without a database):
+  pass `runId` in the invocation input to use your own ID verbatim. This
+  is the seam for hosts that register their own run IDs, such as a
+  worker that resolves each attempt in its own tables. When omitted, a
+  random UUID is generated per invocation.
+- **Durable execution** (a database plus `runWorker`): attempts are
+  fenced, so every attempt needs a fresh ID and a caller-supplied `runId`
+  is rejected instead of being silently ignored. To control the format,
+  pass `generateRunId` to `defineRuntime`; the worker calls it each time
+  it goes to claim work and uses the returned value for the attempt it
+  takes (a claim that finds no work discards the value unused, so the
+  factory must be cheap and safe to call often). The worker checks that
+  each value is a UUID (the run ID is stored in a Postgres `uuid`
+  column) and fails loudly on anything else. Returning a unique value
+  on every call is the factory's contract: a duplicate that is still in
+  use violates the unique index on active run IDs and fails that claim,
+  and attempt fencing assumes run IDs are never reused.
+
 ## Limitations
 
 - **Not for massive throughput:** Runwarden targets indie and solo scale:

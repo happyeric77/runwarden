@@ -114,6 +114,7 @@ export async function getInvocationRowById(
 export interface ClaimOptions {
   leaseTimeoutMs: number;
   maxBatchSize: number;
+  runId?: string;
 }
 
 export interface ClaimResult {
@@ -129,6 +130,11 @@ export async function claimInvocations(
   workerId: string,
   options: ClaimOptions,
 ): Promise<ClaimResult> {
+  if (options.runId !== undefined && options.maxBatchSize !== 1) {
+    throw new Error(
+      'ClaimOptions.runId requires maxBatchSize of 1: a single runId cannot identify multiple attempts',
+    );
+  }
   const result = await db.execute(sql`
     with exhausted as (
       update agent_runtime.invocations
@@ -177,7 +183,7 @@ export async function claimInvocations(
           lease_heartbeat_at = now(),
           lease_expires_at = now() + (${options.leaseTimeoutMs} * interval '1 millisecond'),
           started_at = coalesce(inv.started_at, now()),
-          active_run_id = gen_random_uuid(),
+          active_run_id = coalesce(${options.runId ?? null}::uuid, gen_random_uuid()),
           active_run_registered_at = now(),
           updated_at = now()
       from candidate

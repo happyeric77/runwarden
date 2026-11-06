@@ -3,6 +3,7 @@ import type { AgentRuntimeError } from './errors.js';
 export interface InvocationInput {
   scope: string;
   prompt: string;
+  runId?: string;
   conversationId?: string;
   orderingKey?: string;
   context?: Record<string, unknown>;

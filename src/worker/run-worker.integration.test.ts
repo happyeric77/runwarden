@@ -17,6 +17,8 @@ import {
   claimInvocations,
   enqueueInvocation,
   getInvocationRowById,
+  heartbeatInvocation,
+  markInvocationSucceeded,
 } from '../db/repositories/invocations.js';
 import {
   startTestPostgres,
@@ -1540,6 +1542,370 @@ describe('invocation settled callbacks', () => {
       releaseGate();
       await worker.stop();
     }
+  });
+});
+
+describe('caller run identity', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function finish(content: unknown[]) {
+    return {
+      content: content as never,
+      finishReason: { unified: 'stop', raw: 'stop' } as const,
+      usage: {
+        inputTokens: {
+          total: 1,
+          noCache: 1,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+      },
+      warnings: [],
+    };
+  }
+
+  it('rejects a caller runId for durable enqueue and invoke', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+    });
+    await expect(
+      runtime.enqueue({
+        scope: 'caller-run-id',
+        prompt: 'Hi',
+        runId: 'host-1',
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: { code: 'caller_run_id_in_durable_mode' },
+    });
+    await expect(
+      runtime.invoke({
+        scope: 'caller-run-id',
+        prompt: 'Hi',
+        runId: 'host-1',
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: { code: 'caller_run_id_in_durable_mode' },
+    });
+    const rows = await handle.db.execute(
+      sql`select count(*)::int as n from agent_runtime.invocations where scope = 'caller-run-id'`,
+    );
+    expect((rows.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it('refuses a caller runId on a multi-row claim', async () => {
+    await expect(
+      claimInvocations(handle.db, 'worker-x', {
+        leaseTimeoutMs: 1_000,
+        maxBatchSize: 2,
+        runId: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).rejects.toThrow(/maxBatchSize of 1/);
+  });
+
+  it('mints per-attempt runIds with the generateRunId factory', async () => {
+    const minted: string[] = [];
+    const openedRunIds: string[] = [];
+    const fakeMcpClient: McpToolClient = {
+      async open(input) {
+        openedRunIds.push(input.runId);
+        return {
+          async callTool() {
+            return JSON.stringify([{ type: 'text', text: 'note body' }]);
+          },
+          async close() {},
+        };
+      },
+    };
+    let generations = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        generations++;
+        if (generations === 1) {
+          throw new Error('first attempt fails');
+        }
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('note body')) {
+          return finish([{ type: 'text', text: 'Recovered.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-note',
+            toolName: 'notes__get',
+            input: '{}',
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'notes__get',
+          description: 'Get a note',
+          inputSchema: z.object({}),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      generateRunId: () => {
+        const id = `00000000-0000-4000-8000-${String(minted.length + 1).padStart(12, '0')}`;
+        minted.push(id);
+        return id;
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 50,
+    });
+    try {
+      const first = await runtime.enqueue({
+        scope: 'caller-run-id-factory',
+        prompt: 'Get the note',
+        maxAttempts: 2,
+      });
+      const result = await runtime.waitForInvocation(first.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Recovered.');
+      const firstRow = await getInvocationRowById(
+        handle.db,
+        first.invocationId,
+      );
+      expect(firstRow?.attemptCount).toBe(2);
+      expect(firstRow?.activeRunId).toBeTruthy();
+      expect(minted).toContain(firstRow?.activeRunId);
+      // The MCP session for the executing attempt carried that attempt's id.
+      expect(openedRunIds).toEqual([firstRow?.activeRunId]);
+
+      const second = await runtime.enqueue({
+        scope: 'caller-run-id-factory',
+        prompt: 'Get the note',
+        maxAttempts: 1,
+      });
+      await runtime.waitForInvocation(second.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      const secondRow = await getInvocationRowById(
+        handle.db,
+        second.invocationId,
+      );
+      expect(secondRow?.activeRunId).toBeTruthy();
+      expect(minted).toContain(secondRow?.activeRunId);
+      expect(secondRow?.activeRunId).not.toBe(firstRow?.activeRunId);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fails the worker loudly when generateRunId returns a non-UUID', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => 'not-a-uuid',
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    await expect(worker.stop()).rejects.toThrow(
+      /generateRunId must return a UUID/,
+    );
+  });
+
+  it('keeps a generateRunId failure observable through a delayed stop()', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => 'not-a-uuid',
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    // The loop rejects on its first turn, long before this stop() call.
+    // If that rejection were left unhandled in the meantime, Node would
+    // terminate the process instead of letting stop() observe it.
+    await sleep(250);
+    await expect(worker.stop()).rejects.toThrow(
+      /generateRunId must return a UUID/,
+    );
+  });
+
+  it('fails loudly when generateRunId throws', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => {
+        throw new Error('factory boom');
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    await expect(worker.stop()).rejects.toThrow(/factory boom/);
+  });
+
+  it("gives an approval rerun the factory's next runId", async () => {
+    const minted: string[] = [];
+    const openedRunIds: string[] = [];
+    const refundClient: McpToolClient = {
+      async open(input) {
+        openedRunIds.push(input.runId);
+        return {
+          async callTool() {
+            return JSON.stringify([{ type: 'text', text: 'Refund completed' }]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('Refund completed')) {
+          return finish([{ type: 'text', text: 'Refund done.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-refund',
+            toolName: 'billing__refund',
+            input: JSON.stringify({ amount: 100 }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: refundClient,
+      tools: [
+        {
+          name: 'billing__refund',
+          description: 'Refund a payment',
+          inputSchema: z.object({ amount: z.number() }),
+        },
+      ],
+      policies: { requireApproval: ['billing__refund'] },
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      generateRunId: () => {
+        const id = `10000000-0000-4000-8000-${String(minted.length + 1).padStart(12, '0')}`;
+        minted.push(id);
+        return id;
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'caller-run-id-approval',
+        prompt: 'Refund this customer',
+      });
+      await waitFor(async () => {
+        const record = await runtime.getInvocation(invocationId);
+        return record?.status === 'awaiting_approval';
+      });
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      const parkedRunId = parked?.activeRunId ?? '';
+      expect(parkedRunId).not.toBe('');
+      expect(minted).toContain(parkedRunId);
+
+      await runtime.approveInvocation(invocationId);
+      const result = await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Refund done.');
+      const settled = await getInvocationRowById(handle.db, invocationId);
+      const settledRunId = settled?.activeRunId ?? '';
+      expect(settledRunId).not.toBe('');
+      expect(minted).toContain(settledRunId);
+      expect(settledRunId).not.toBe(parkedRunId);
+      // The rerun ran under an ID minted after the parked attempt's ID:
+      // the factory's next value, not a reuse of the parked one.
+      expect(minted.indexOf(settledRunId)).toBeGreaterThan(
+        minted.indexOf(parkedRunId),
+      );
+      expect(openedRunIds).toEqual([settledRunId]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fences heartbeat and completion on a factory-supplied runId', async () => {
+    const runId = '33333333-3333-4333-8333-333333333333';
+    const wrongRunId = '44444444-4444-4444-8444-444444444444';
+    await enqueueInvocation(handle.db, {
+      scope: 'caller-run-id-fencing',
+      prompt: 'Hi',
+      maxAttempts: 1,
+    });
+    const { claimed } = await claimInvocations(handle.db, 'worker-x', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+      runId,
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.activeRunId).toBe(runId);
+    const rowId = claimed[0]!.id;
+    await expect(
+      heartbeatInvocation(handle.db, rowId, 'worker-x', wrongRunId, 30_000),
+    ).resolves.toBe(false);
+    await expect(
+      heartbeatInvocation(handle.db, rowId, 'worker-x', runId, 30_000),
+    ).resolves.toBe(true);
+    await expect(
+      markInvocationSucceeded(handle.db, rowId, 'worker-x', wrongRunId, {
+        resultText: 'nope',
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      markInvocationSucceeded(handle.db, rowId, 'worker-x', runId, {
+        resultText: 'done',
+      }),
+    ).resolves.toBe(true);
   });
 });
 
