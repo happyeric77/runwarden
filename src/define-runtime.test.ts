@@ -179,3 +179,103 @@ it.each([false, true])(
     }
   },
 );
+
+function noteModel() {
+  return new MockLanguageModelV4({
+    doGenerate: async (options) => {
+      const promptText = JSON.stringify(options.prompt);
+      const usage = {
+        inputTokens: {
+          total: 1,
+          noCache: 1,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+      };
+      if (promptText.includes('note body')) {
+        return {
+          content: [{ type: 'text', text: 'Got the note.' }],
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage,
+          warnings: [],
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'call-note',
+            toolName: 'notes__get',
+            input: '{}',
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: 'tool_calls' } as const,
+        usage,
+        warnings: [],
+      };
+    },
+  });
+}
+
+function recordingMcpClient(openedRunIds: string[]) {
+  return {
+    async open(input: { runId: string }) {
+      openedRunIds.push(input.runId);
+      return {
+        async callTool() {
+          return JSON.stringify([{ type: 'text', text: 'note body' }]);
+        },
+        async close() {},
+      };
+    },
+  };
+}
+
+const noteTools = [
+  {
+    name: 'notes__get',
+    description: 'Get a note',
+    inputSchema: z.object({}),
+  },
+];
+
+it('uses a caller-supplied runId for direct execution', async () => {
+  const openedRunIds: string[] = [];
+  const runtime = api.defineRuntime({
+    model: noteModel(),
+    tools: noteTools,
+    mcpClient: recordingMcpClient(openedRunIds),
+  });
+  const result = await runtime.invoke({
+    scope: 'scope-a',
+    prompt: 'Get a note',
+    runId: 'host-run-42',
+  });
+  expect(result.text).toBe('Got the note.');
+  expect(result.runId).toBe('host-run-42');
+  expect(openedRunIds).toEqual(['host-run-42']);
+});
+
+it('generates a fresh UUID runId per direct invocation by default', async () => {
+  const openedRunIds: string[] = [];
+  const runtime = api.defineRuntime({
+    model: noteModel(),
+    tools: noteTools,
+    mcpClient: recordingMcpClient(openedRunIds),
+  });
+  const first = await runtime.invoke({
+    scope: 'scope-a',
+    prompt: 'Get a note',
+  });
+  const second = await runtime.invoke({
+    scope: 'scope-a',
+    prompt: 'Get a note',
+  });
+  const uuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  expect(first.runId).toMatch(uuid);
+  expect(second.runId).toMatch(uuid);
+  expect(first.runId).not.toBe(second.runId);
+  expect(openedRunIds).toEqual([first.runId, second.runId]);
+});

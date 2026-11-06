@@ -277,6 +277,22 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
 
   const loop = (async () => {
     while (!stopped) {
+      // Minted outside the claim error path on purpose: a generateRunId
+      // that throws or returns a non-UUID is a configuration error and
+      // must fail the worker loudly, not spin in the retry loop.
+      let claimRunId: string | undefined;
+      if (internals?.generateRunId) {
+        claimRunId = internals.generateRunId();
+        if (
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+            claimRunId,
+          )
+        ) {
+          throw new Error(
+            `generateRunId must return a UUID string, got: ${claimRunId}`,
+          );
+        }
+      }
       let claimed: {
         row: InvocationRow;
         lease: ReturnType<typeof guardLease>;
@@ -287,6 +303,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
             leaseTimeoutMs,
             // Execution is serial, so only claim work we can heartbeat now.
             maxBatchSize: 1,
+            runId: claimRunId,
           });
           claimed = result.claimed.map((row) => ({
             row,

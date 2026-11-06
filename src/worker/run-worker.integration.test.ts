@@ -1543,6 +1543,198 @@ describe('invocation settled callbacks', () => {
   });
 });
 
+describe('caller run identity', () => {
+  let pg: TestPostgres;
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    pg = await startTestPostgres();
+    handle = createDb(pg.connectionString);
+    await initDb(handle);
+  });
+
+  afterAll(async () => {
+    await handle?.close();
+    await pg?.stop();
+  });
+
+  function finish(content: unknown[]) {
+    return {
+      content: content as never,
+      finishReason: { unified: 'stop', raw: 'stop' } as const,
+      usage: {
+        inputTokens: {
+          total: 1,
+          noCache: 1,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+      },
+      warnings: [],
+    };
+  }
+
+  it('rejects a caller runId for durable enqueue and invoke', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+    });
+    await expect(
+      runtime.enqueue({
+        scope: 'caller-run-id',
+        prompt: 'Hi',
+        runId: 'host-1',
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: { code: 'caller_run_id_in_durable_mode' },
+    });
+    await expect(
+      runtime.invoke({
+        scope: 'caller-run-id',
+        prompt: 'Hi',
+        runId: 'host-1',
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: { code: 'caller_run_id_in_durable_mode' },
+    });
+  });
+
+  it('refuses a caller runId on a multi-row claim', async () => {
+    await expect(
+      claimInvocations(handle.db, 'worker-x', {
+        leaseTimeoutMs: 1_000,
+        maxBatchSize: 2,
+        runId: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).rejects.toThrow(/maxBatchSize of 1/);
+  });
+
+  it('mints per-attempt runIds with the generateRunId factory', async () => {
+    const minted: string[] = [];
+    const openedRunIds: string[] = [];
+    const fakeMcpClient: McpToolClient = {
+      async open(input) {
+        openedRunIds.push(input.runId);
+        return {
+          async callTool() {
+            return JSON.stringify([{ type: 'text', text: 'note body' }]);
+          },
+          async close() {},
+        };
+      },
+    };
+    let generations = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        generations++;
+        if (generations === 1) {
+          throw new Error('first attempt fails');
+        }
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('note body')) {
+          return finish([{ type: 'text', text: 'Recovered.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-note',
+            toolName: 'notes__get',
+            input: '{}',
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'notes__get',
+          description: 'Get a note',
+          inputSchema: z.object({}),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      generateRunId: () => {
+        const id = `00000000-0000-4000-8000-${String(minted.length + 1).padStart(12, '0')}`;
+        minted.push(id);
+        return id;
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+      retryDelayMs: 50,
+    });
+    try {
+      const first = await runtime.enqueue({
+        scope: 'caller-run-id-factory',
+        prompt: 'Get the note',
+        maxAttempts: 2,
+      });
+      const result = await runtime.waitForInvocation(first.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Recovered.');
+      const firstRow = await getInvocationRowById(
+        handle.db,
+        first.invocationId,
+      );
+      expect(firstRow?.attemptCount).toBe(2);
+      expect(firstRow?.activeRunId).toBeTruthy();
+      expect(minted).toContain(firstRow?.activeRunId);
+      // The MCP session for the executing attempt carried that attempt's id.
+      expect(openedRunIds).toEqual([firstRow?.activeRunId]);
+
+      const second = await runtime.enqueue({
+        scope: 'caller-run-id-factory',
+        prompt: 'Get the note',
+        maxAttempts: 1,
+      });
+      await runtime.waitForInvocation(second.invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      const secondRow = await getInvocationRowById(
+        handle.db,
+        second.invocationId,
+      );
+      expect(secondRow?.activeRunId).toBeTruthy();
+      expect(minted).toContain(secondRow?.activeRunId);
+      expect(secondRow?.activeRunId).not.toBe(firstRow?.activeRunId);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fails the worker loudly when generateRunId returns a non-UUID', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => 'not-a-uuid',
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    await expect(worker.stop()).rejects.toThrow(
+      /generateRunId must return a UUID/,
+    );
+  });
+});
+
 describe('tool call audits', () => {
   let pg: TestPostgres;
   let handle: DatabaseHandle;
