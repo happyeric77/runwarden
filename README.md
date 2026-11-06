@@ -363,9 +363,13 @@ Who generates it depends on how the invocation runs:
   is rejected instead of being silently ignored. To control the format,
   pass `generateRunId` to `defineRuntime`; the worker calls it each time
   it goes to claim work and uses the returned value for the attempt it
-  takes. It must return a unique UUID string on every call (the run ID
-  is stored in a Postgres `uuid` column), and the worker fails loudly if
-  it does not.
+  takes (a claim that finds no work discards the value unused, so the
+  factory must be cheap and safe to call often). The worker checks that
+  each value is a UUID (the run ID is stored in a Postgres `uuid`
+  column) and fails loudly on anything else. Returning a unique value
+  on every call is the factory's contract: a duplicate that is still in
+  use violates the unique index on active run IDs and fails that claim,
+  and attempt fencing assumes run IDs are never reused.
 
 ## Limitations
 

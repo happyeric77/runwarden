@@ -17,6 +17,8 @@ import {
   claimInvocations,
   enqueueInvocation,
   getInvocationRowById,
+  heartbeatInvocation,
+  markInvocationSucceeded,
 } from '../db/repositories/invocations.js';
 import {
   startTestPostgres,
@@ -1600,6 +1602,10 @@ describe('caller run identity', () => {
     ).rejects.toMatchObject({
       diagnostics: { code: 'caller_run_id_in_durable_mode' },
     });
+    const rows = await handle.db.execute(
+      sql`select count(*)::int as n from agent_runtime.invocations where scope = 'caller-run-id'`,
+    );
+    expect((rows.rows[0] as { n: number }).n).toBe(0);
   });
 
   it('refuses a caller runId on a multi-row claim', async () => {
@@ -1732,6 +1738,167 @@ describe('caller run identity', () => {
     await expect(worker.stop()).rejects.toThrow(
       /generateRunId must return a UUID/,
     );
+  });
+
+  it('keeps a generateRunId failure observable through a delayed stop()', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => 'not-a-uuid',
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    // The loop rejects on its first turn, long before this stop() call.
+    // If that rejection were left unhandled in the meantime, Node would
+    // terminate the process instead of letting stop() observe it.
+    await sleep(250);
+    await expect(worker.stop()).rejects.toThrow(
+      /generateRunId must return a UUID/,
+    );
+  });
+
+  it('fails loudly when generateRunId throws', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => finish([{ type: 'text', text: 'unused' }]),
+      }),
+      generateRunId: () => {
+        throw new Error('factory boom');
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    await expect(worker.stop()).rejects.toThrow(/factory boom/);
+  });
+
+  it("gives an approval rerun the factory's next runId", async () => {
+    const minted: string[] = [];
+    const openedRunIds: string[] = [];
+    const refundClient: McpToolClient = {
+      async open(input) {
+        openedRunIds.push(input.runId);
+        return {
+          async callTool() {
+            return JSON.stringify([{ type: 'text', text: 'Refund completed' }]);
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('Refund completed')) {
+          return finish([{ type: 'text', text: 'Refund done.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'call-refund',
+            toolName: 'billing__refund',
+            input: JSON.stringify({ amount: 100 }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: refundClient,
+      tools: [
+        {
+          name: 'billing__refund',
+          description: 'Refund a payment',
+          inputSchema: z.object({ amount: z.number() }),
+        },
+      ],
+      policies: { requireApproval: ['billing__refund'] },
+      loadSystemPrompt: async () => 'You are helpful.',
+      loadHistory: async () => [],
+      generateRunId: () => {
+        const id = `10000000-0000-4000-8000-${String(minted.length + 1).padStart(12, '0')}`;
+        minted.push(id);
+        return id;
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'caller-run-id-approval',
+        prompt: 'Refund this customer',
+      });
+      await waitFor(async () => {
+        const record = await runtime.getInvocation(invocationId);
+        return record?.status === 'awaiting_approval';
+      });
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      expect(parked?.activeRunId).toBeTruthy();
+      expect(minted).toContain(parked?.activeRunId);
+
+      await runtime.approveInvocation(invocationId);
+      const result = await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Refund done.');
+      const settled = await getInvocationRowById(handle.db, invocationId);
+      expect(settled?.activeRunId).toBeTruthy();
+      expect(minted).toContain(settled?.activeRunId);
+      expect(settled?.activeRunId).not.toBe(parked?.activeRunId);
+      expect(openedRunIds).toEqual([settled?.activeRunId]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('fences heartbeat and completion on a factory-supplied runId', async () => {
+    const runId = '33333333-3333-4333-8333-333333333333';
+    const wrongRunId = '44444444-4444-4444-8444-444444444444';
+    await enqueueInvocation(handle.db, {
+      scope: 'caller-run-id-fencing',
+      prompt: 'Hi',
+      maxAttempts: 1,
+    });
+    const { claimed } = await claimInvocations(handle.db, 'worker-x', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+      runId,
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.activeRunId).toBe(runId);
+    const rowId = claimed[0]!.id;
+    await expect(
+      heartbeatInvocation(handle.db, rowId, 'worker-x', wrongRunId, 30_000),
+    ).resolves.toBe(false);
+    await expect(
+      heartbeatInvocation(handle.db, rowId, 'worker-x', runId, 30_000),
+    ).resolves.toBe(true);
+    await expect(
+      markInvocationSucceeded(handle.db, rowId, 'worker-x', wrongRunId, {
+        resultText: 'nope',
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      markInvocationSucceeded(handle.db, rowId, 'worker-x', runId, {
+        resultText: 'done',
+      }),
+    ).resolves.toBe(true);
   });
 });
 

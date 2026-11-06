@@ -329,6 +329,13 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     }
   })();
 
+  // The loop can reject long before anyone calls stop() (a generateRunId
+  // failure is the first-turn case). Without a handler attached now, Node
+  // treats that as an unhandled rejection and kills the process before
+  // stop() can observe it. Awaiting `loop` in stop() still sees the
+  // rejection; this only marks it handled in the meantime.
+  loop.catch(() => {});
+
   return {
     async stop(): Promise<void> {
       stopped = true;
