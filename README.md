@@ -12,7 +12,7 @@ policy and a per-call audit trail, durable on your own Postgres.
 
 ## Overview
 
-<img width="900" alt="Runwarden policy gate: an agent proposes tool calls, Runwarden checks each one against policy, allowed calls execute through MCP tools, approval-gated calls are stopped, and every ruling is written to Postgres" src="assets/gate-overview.svg" />
+<img width="900" alt="Runwarden policy gate: an agent proposes tool calls, Runwarden checks each one against policy, allowed calls execute through MCP tools, approval-gated calls are stopped, and every ruling is written to Postgres" src="packages/runwarden/assets/gate-overview.svg" />
 
 Agent runs rarely fail by crashing. They fail by staying alive and doing
 the wrong thing: picking the wrong tool, calling it twice, or reaching for
@@ -193,7 +193,7 @@ The invocation ran in a durable worker, the tool call executed through
 MCP under policy, and the audit row is already in your Postgres. To gate
 a tool behind human approval, add
 `policies: { requireApproval: ['your__tool'] }` to `defineRuntime`; the
-[full quickstart](examples/quickstart/README.md) walks through that flow
+[full quickstart](packages/runwarden/examples/quickstart/README.md) walks through that flow
 end to end.
 
 ## The full quickstart (from the repo)
@@ -212,7 +212,7 @@ git clone https://github.com/happyeric77/runwarden.git
 cd runwarden
 pnpm install
 export MODEL_API_KEY=sk-... # any OpenAI-compatible endpoint
-docker compose -f examples/quickstart/docker-compose.yml up -d --wait
+docker compose -f packages/runwarden/examples/quickstart/docker-compose.yml up -d --wait
 pnpm quickstart
 ```
 
@@ -223,11 +223,11 @@ It then prints both invocations and their policy decisions from Postgres. Occasi
 the refund tool; the example reports that nothing was intercepted rather than
 claiming a blocked call. After approval, a text-only response does not prove a
 refund executed; changed arguments park again without automatic approval. The
-summary reports those outcomes from the audit rows. The [quickstart README](examples/quickstart/README.md)
+summary reports those outcomes from the audit rows. The [quickstart README](packages/runwarden/examples/quickstart/README.md)
 walks through each step and what you should see.
 
 For the production-shaped setup (separate app and worker processes and a
-real model provider), see [examples/durable](examples/durable/README.md).
+real model provider), see [examples/durable](packages/runwarden/examples/durable/README.md).
 
 ## How It Works
 

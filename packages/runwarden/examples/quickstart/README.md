@@ -14,7 +14,7 @@ From the repository root, with Node.js 22+, pnpm, and Docker Compose:
 ```sh
 pnpm install --frozen-lockfile
 export MODEL_API_KEY=sk-... # any OpenAI-compatible endpoint works
-docker compose -f examples/quickstart/docker-compose.yml up -d --wait
+docker compose -f packages/runwarden/examples/quickstart/docker-compose.yml up -d --wait
 pnpm quickstart
 ```
 
@@ -29,7 +29,7 @@ runs both invocations, prints the audit trail out of Postgres, and exits.
 To reset afterwards:
 
 ```sh
-docker compose -f examples/quickstart/docker-compose.yml down -v
+docker compose -f packages/runwarden/examples/quickstart/docker-compose.yml down -v
 ```
 
 ## What you should see
