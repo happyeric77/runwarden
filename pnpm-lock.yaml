@@ -6,7 +6,9 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  packages/runwarden:
     dependencies:
       '@ai-sdk/openai-compatible':
         specifier: 3.0.60
