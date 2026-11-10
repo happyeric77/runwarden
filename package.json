@@ -16,8 +16,10 @@
   },
   "scripts": {
     "build": "pnpm --filter runwarden build",
+    "demo": "pnpm --filter runwarden demo",
     "format": "pnpm --filter runwarden format",
     "format:check": "pnpm --filter runwarden format:check",
+    "quickstart": "pnpm --filter runwarden quickstart",
     "test": "pnpm --filter runwarden test",
     "test:integration": "pnpm --filter runwarden test:integration",
     "typecheck": "pnpm --filter runwarden typecheck"

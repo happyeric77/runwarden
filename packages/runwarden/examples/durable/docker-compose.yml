@@ -17,10 +17,11 @@ services:
 
   worker:
     image: node:24-alpine
-    working_dir: /app
+    working_dir: /app/packages/runwarden
     volumes:
-      - ../..:/app
+      - ../../../..:/app
       - /app/node_modules
+      - /app/packages/runwarden/node_modules
     environment:
       DATABASE_URL: postgres://postgres:password@postgres:5432/durable_agent_runtime
       MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
@@ -30,16 +31,17 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      sh -c "corepack enable && pnpm install --frozen-lockfile
+      sh -c "corepack enable && pnpm --dir /app install --frozen-lockfile
       && pnpm exec tsx src/cli.ts init
       && exec node --import tsx examples/durable/worker.ts"
 
   app:
     image: node:24-alpine
-    working_dir: /app
+    working_dir: /app/packages/runwarden
     volumes:
-      - ../..:/app
+      - ../../../..:/app
       - /app/node_modules
+      - /app/packages/runwarden/node_modules
     environment:
       DATABASE_URL: postgres://postgres:password@postgres:5432/durable_agent_runtime
       MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
@@ -49,7 +51,7 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      sh -c "corepack enable && pnpm install --frozen-lockfile
+      sh -c "corepack enable && pnpm --dir /app install --frozen-lockfile
       && pnpm exec tsx src/cli.ts init
       && pnpm exec tsx examples/durable/app.ts"
 

@@ -212,7 +212,7 @@ git clone https://github.com/happyeric77/runwarden.git
 cd runwarden
 pnpm install
 export MODEL_API_KEY=sk-... # any OpenAI-compatible endpoint
-docker compose -f examples/quickstart/docker-compose.yml up -d --wait
+docker compose -f packages/runwarden/examples/quickstart/docker-compose.yml up -d --wait
 pnpm quickstart
 ```
 
