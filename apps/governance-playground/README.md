@@ -34,7 +34,7 @@ Shop and seed tests use embedded Postgres. Compose is not required. `pnpm typech
 
 The assistant is impatient and tries to refund three orders in one step. Policy sends that step back. The assistant then refunds one order at a time.
 
-From this directory:
+From the repo root, run `pnpm build` once. This app imports the built `runwarden` package. Then, from this directory:
 
 ```sh
 docker compose up -d --wait
