@@ -188,6 +188,7 @@ export async function issueRefund(
       if (!locked.rows[0]) throw new Error(`order not found: ${input.orderId}`);
       const verdict = await client.query<{ reason: string | null }>(
         `select case
+           when status = 'cancelled' then 'cannot refund a cancelled order'
            when $2::numeric <= 0 then 'amount must be positive'
            when $2::numeric > amount then 'amount exceeds order amount'
            when coalesce((select sum(amount) from refunds where order_id = orders.id), 0) >= amount

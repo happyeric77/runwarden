@@ -11,7 +11,8 @@
     "format": "prettier --write '**/*.{ts,json,md}'",
     "format:check": "prettier --check '**/*.{ts,json,md}'",
     "seed": "tsx src/seed.ts",
-    "mcp": "tsx src/mcp-server.ts"
+    "mcp": "tsx src/mcp-server.ts",
+    "play": "tsx src/play.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "ai": "7.0.123",
     "@types/pg": "^8.15.5",
     "embedded-postgres": "^18.4.0-beta.17",
     "prettier": "3.6.2",
