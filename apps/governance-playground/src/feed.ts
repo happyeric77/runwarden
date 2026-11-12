@@ -48,12 +48,25 @@ export async function startFeedServer(port: number) {
                (select count(*)::int from agent_runtime.policy_decisions where decision = 'correction_issued') as corrections,
                (select count(*)::int from agent_runtime.invocations where status = 'awaiting_approval') as "awaitingApproval"
       `);
+      const pendingApprovals = await db.pool.query(`
+        select id::text as "invocationId", pending_tool_call->>'toolName' as tool,
+               pending_tool_call->'input' as input, created_at as "createdAt"
+          from agent_runtime.invocations
+         where status = 'awaiting_approval'
+         order by created_at, id
+      `);
       res
         .writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
           'Cache-Control': 'no-store',
         })
-        .end(JSON.stringify({ events: events.rows, stats: stats.rows[0] }));
+        .end(
+          JSON.stringify({
+            events: events.rows,
+            stats: stats.rows[0],
+            pendingApprovals: pendingApprovals.rows,
+          }),
+        );
     } catch (error) {
       console.error('Feed query failed:', error);
       res

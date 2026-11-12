@@ -62,6 +62,10 @@
   <body>
     <h1>Governance live feed</h1>
     <p id="stats">Loading statistics...</p>
+    <section id="pending" hidden>
+      <h2>Pending approvals</h2>
+      <ul id="pending-list"></ul>
+    </section>
     <p id="message" role="status"></p>
     <ul id="events" aria-label="Governance events"></ul>
     <script>
@@ -70,9 +74,18 @@
         try {
           const response = await fetch('/api/events', { cache: 'no-store' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const { events, stats } = await response.json();
+          const { events, stats, pendingApprovals } = await response.json();
           document.querySelector('#stats').textContent =
             `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
+          document.querySelector('#pending').hidden =
+            pendingApprovals.length === 0;
+          document.querySelector('#pending-list').replaceChildren(
+            ...pendingApprovals.map((approval) => {
+              const row = document.createElement('li');
+              row.textContent = `${approval.invocationId}: ${approval.tool} ${JSON.stringify(approval.input)}`;
+              return row;
+            }),
+          );
           const rows = events.map((event) => {
             const row = document.createElement('li');
             const time = document.createElement('time');
