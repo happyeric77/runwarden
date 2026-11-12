@@ -16,10 +16,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter governance-playground format:check
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm --filter governance-playground typecheck
+      - run: pnpm --filter governance-playground test
       - run: pnpm test:integration
       - run: npm pack --dry-run
         working-directory: packages/runwarden

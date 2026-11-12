@@ -58,8 +58,14 @@ export async function startPlaygroundMcpServer(
     await handle.close();
     throw error;
   }
+  const bound = httpServer.address();
+  if (!bound || typeof bound === 'string') {
+    httpServer.close();
+    await handle.close();
+    throw new Error('mcp server did not bind a port');
+  }
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
+    url: `http://127.0.0.1:${bound.port}/mcp`,
     close: async () => {
       await new Promise<void>((resolve, reject) =>
         httpServer.close((error) => (error ? reject(error) : resolve())),

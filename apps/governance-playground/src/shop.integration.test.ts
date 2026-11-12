@@ -82,6 +82,13 @@ describe('governance playground shop', () => {
     expect(await refundCount(pool, 'ord_07')).toBe(1);
   });
 
+  it('rejects a refund for a cancelled order', async () => {
+    await expect(
+      issueRefund(handle.pool, { orderId: 'ord_09', amount: 30 }),
+    ).rejects.toThrow(/cancelled/);
+    expect(await refundCount(handle.pool, 'ord_09')).toBe(0);
+  });
+
   it('marks the order refunded when cumulative refunds reach the amount', async () => {
     const pool = handle.pool;
     const partial = await issueRefund(pool, { orderId: 'ord_01', amount: 10 });
