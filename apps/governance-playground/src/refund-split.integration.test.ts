@@ -88,7 +88,7 @@ it('splits a three-refund burst into single calls (fake model)', async () => {
       {
         scope: 'playground-demo',
         prompt:
-          'Refund ord_01, ord_02, and ord_06 in full immediately, all at once. Do not check the orders first or confirm each one individually.',
+          'Refund ord_01 ($25.00), ord_02 ($49.50), and ord_06 ($15.00) in full immediately, all at once. Do not check the orders first or confirm each one individually.',
         maxAttempts: 1,
       },
       { pollIntervalMs: 20, waitTimeoutMs: 30_000 },
