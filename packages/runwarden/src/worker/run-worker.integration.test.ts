@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { AgentRuntimeError } from '../contracts/errors.js';
-import type { PolicyDecision } from '../contracts/policy.js';
+import type { PolicyDecision, RuntimePolicies } from '../contracts/policy.js';
 import type {
   InvocationRecord,
   McpToolClient,
@@ -605,7 +605,9 @@ describe('approval state machine', () => {
     await pg?.stop();
   });
 
-  function setup() {
+  function setup(
+    requireApproval: RuntimePolicies['requireApproval'] = ['billing__refund'],
+  ) {
     let executedTools = 0;
     let amountCents = 5000;
     const fakeMcpClient: McpToolClient = {
@@ -670,7 +672,7 @@ describe('approval state machine', () => {
       ],
       loadSystemPrompt: async () => 'You are a helpful billing assistant.',
       loadHistory: async () => [],
-      policies: { requireApproval: ['billing__refund'] },
+      policies: { requireApproval },
     });
     const worker = runWorker({
       runtime,
@@ -696,6 +698,67 @@ describe('approval state machine', () => {
     );
     return result.rows.map((row) => row.decision);
   }
+
+  it('applies a refund threshold and reruns the approved call', async () => {
+    const predicate = vi.fn(
+      ({
+        toolName,
+        input,
+      }: {
+        scope: string;
+        toolName: string;
+        input: unknown;
+      }) =>
+        toolName === 'billing__refund' &&
+        (input as { amountCents: number }).amountCents > 5000,
+    );
+    const { runtime, worker, executed, setAmount } = setup(predicate);
+    try {
+      setAmount(4900);
+      const small = await runtime.invoke(
+        { scope: 'threshold', prompt: 'Refund', maxAttempts: 1 },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+      expect(executed()).toBe(1);
+      expect(await decisionsFor(small.invocationId)).not.toContain(
+        'approval_requested',
+      );
+      setAmount(5100);
+      const { invocationId } = await runtime.enqueue({
+        scope: 'threshold',
+        prompt: 'Refund',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      expect(executed()).toBe(1);
+      expect(await decisionsFor(invocationId)).toContain('approval_requested');
+      await runtime.approveInvocation(invocationId, { resolvedBy: 'admin-1' });
+      await runtime.waitForInvocation(invocationId, {
+        pollIntervalMs: 50,
+        waitTimeoutMs: 30_000,
+      });
+      expect(executed()).toBe(2);
+      const result = await handle.pool.query(
+        `select detail from agent_runtime.policy_decisions where invocation_id = $1 and rule = 'require_approval' and decision = 'allow'`,
+        [invocationId],
+      );
+      expect(result.rows).toContainEqual({
+        detail: expect.objectContaining({ viaApproval: true }),
+      });
+      expect(
+        predicate.mock.calls.filter(
+          ([call]) =>
+            (call.input as { amountCents: number }).amountCents === 5100,
+        ).length,
+      ).toBeGreaterThanOrEqual(2);
+    } finally {
+      await worker.stop();
+    }
+  });
 
   it('parks a gated call, then an approval reruns it to completion', async () => {
     const { runtime, worker, executed } = setup();

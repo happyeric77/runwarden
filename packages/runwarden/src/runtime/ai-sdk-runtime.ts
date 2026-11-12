@@ -217,6 +217,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
       approvedToolCall: input.approvedToolCall,
     });
 
+    let approvalError: { error: unknown } | undefined;
     try {
       const systemPrompt = this.options.loadSystemPrompt
         ? await this.options.loadSystemPrompt(input)
@@ -257,14 +258,20 @@ export class AiSdkNativeRuntime implements AgentRuntime {
             (part) => part.type === 'tool-call',
           ).length;
         },
-        toolApproval: ({ toolCall }) =>
-          policy.approvalFor({
-            toolName: toolCall.toolName,
-            toolCallId: toolCall.toolCallId,
-            toolInput: toolCall.input,
-            proposalCount: state.currentProposalCount,
-            scope: input.scope,
-          }),
+        toolApproval: ({ toolCall }) => {
+          try {
+            return policy.approvalFor({
+              toolName: toolCall.toolName,
+              toolCallId: toolCall.toolCallId,
+              toolInput: toolCall.input,
+              proposalCount: state.currentProposalCount,
+              scope: input.scope,
+            });
+          } catch (error) {
+            approvalError = { error };
+            throw error;
+          }
+        },
         onStepEnd: (step) => {
           policy.afterStep(step.toolCalls as ParsedToolCall[]);
         },
@@ -306,6 +313,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         model,
       };
     } catch (error) {
+      if (approvalError) throw approvalError.error;
       const runtimeError = findAgentRuntimeError(error);
       if (runtimeError) throw runtimeError;
       if (isTimeoutFailure(error)) {

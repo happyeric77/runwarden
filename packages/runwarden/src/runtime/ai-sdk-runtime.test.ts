@@ -560,6 +560,64 @@ describe('AiSdkNativeRuntime', () => {
     },
   );
 
+  it.each([false, true])(
+    'evaluates a per-call approval predicate: %s',
+    async (required) => {
+      const onPolicyDecision = vi.fn();
+      const predicate = vi.fn(() => required);
+      const subject = runtime(
+        [
+          toolStep(toolCall('call', directoryTools.get, { recordId: 7 })),
+          textStep('Done'),
+        ],
+        { policies: { requireApproval: predicate }, onPolicyDecision },
+      );
+      if (required) {
+        await expect(subject.instance.invoke(invocation)).rejects.toMatchObject(
+          {
+            diagnostics: { code: 'approval_required' },
+          },
+        );
+        expect(subject.callTool).not.toHaveBeenCalled();
+        expect(onPolicyDecision).toHaveBeenCalledWith(
+          expect.objectContaining({
+            rule: 'require_approval',
+            decision: 'approval_requested',
+          }),
+        );
+      } else {
+        await expect(
+          subject.instance.invoke(invocation),
+        ).resolves.toMatchObject({ text: 'Done' });
+        expect(subject.callTool).toHaveBeenCalledOnce();
+        expect(onPolicyDecision).not.toHaveBeenCalledWith(
+          expect.objectContaining({ decision: 'approval_requested' }),
+        );
+      }
+      expect(predicate).toHaveBeenCalledWith({
+        scope: invocation.scope,
+        toolName: directoryTools.get,
+        input: { recordId: 7 },
+      });
+    },
+  );
+
+  it('propagates approval predicate errors without executing the tool', async () => {
+    const failure = new Error('approval predicate exploded');
+    const subject = runtime(
+      [toolStep(toolCall('call', directoryTools.get, { recordId: 7 }))],
+      {
+        policies: {
+          requireApproval: () => {
+            throw failure;
+          },
+        },
+      },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toBe(failure);
+    expect(subject.callTool).not.toHaveBeenCalled();
+  });
+
   it('executes a gated call that matches an approved tool call', async () => {
     const onPolicyDecision = vi.fn();
     const subject = runtime(

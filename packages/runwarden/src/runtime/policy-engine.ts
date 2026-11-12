@@ -148,8 +148,10 @@ export class PolicyEngine {
       };
     }
 
-    const requiresApproval = this.policies.requireApproval?.includes(
+    const requiresApproval = this.isApprovalRequired(
+      input.scope,
       input.toolName,
+      input.toolInput,
     );
     const matchesApproval =
       this.approvedToolCall !== undefined &&
@@ -307,6 +309,17 @@ export class PolicyEngine {
           : 'Provider returned invalid tool input',
       toolCalls.length > 1 ? { code: 'multiple_tool_calls' } : undefined,
     );
+  }
+
+  private isApprovalRequired(
+    scope: string,
+    toolName: string,
+    input: unknown,
+  ): boolean {
+    const policy = this.policies.requireApproval;
+    return typeof policy === 'function'
+      ? policy({ scope, toolName, input })
+      : (policy?.includes(toolName) ?? false);
   }
 
   private record(decision: PolicyRuling): void {

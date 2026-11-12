@@ -196,6 +196,20 @@ a tool behind human approval, add
 [full quickstart](examples/quickstart/README.md) walks through that flow
 end to end.
 
+For input-dependent approval, provide a synchronous predicate instead:
+
+```ts
+policies: {
+  requireApproval: ({ toolName, input }) =>
+    toolName === 'billing__refund' &&
+    typeof input === 'object' && input !== null &&
+    'amount' in input && typeof input.amount === 'number' && input.amount > 50,
+}
+```
+
+The predicate also receives `scope`. Return `true` to require approval; a
+thrown error fails the invocation.
+
 ## The full quickstart (from the repo)
 
 ### Requirements
@@ -243,7 +257,7 @@ real model provider), see [examples/durable](examples/durable/README.md).
 5. Every ruling lands in `policy_decisions`, a call's latest dispatch state
    lands in `tool_call_audits`, and invocation state lands in `invocations`.
    Tool audits are latest-state records, not a history of every attempt.
-6. If a proposed call is listed in `requireApproval`, the invocation
+6. If a proposed call requires approval under `requireApproval`, the invocation
    parks in `awaiting_approval` instead of failing. Your app resolves it
    with `approveInvocation` or `rejectInvocation`. Approval reruns the
    whole invocation; rejection cancels it.
