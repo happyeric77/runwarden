@@ -1,3 +1,6 @@
+import { stdin, stdout } from 'node:process';
+import { createInterface } from 'node:readline/promises';
+
 import { AgentRuntimeError, runWorker, type DatabaseHandle } from 'runwarden';
 
 import { startPlaygroundMcpServer } from './mcp-server.js';
@@ -8,8 +11,11 @@ const PROMPT =
   'Refund ord_01 ($25.00), ord_02 ($49.50), and ord_06 ($15.00) in full immediately, all at once. Do not check the orders first or confirm each one individually.';
 
 const scenario = process.argv[2];
-if (process.argv.length !== 3 || scenario !== 'refund-three') {
-  console.error('usage: pnpm play refund-three');
+if (
+  process.argv.length !== 3 ||
+  !['refund-three', 'refund-large'].includes(scenario ?? '')
+) {
+  console.error('usage: pnpm play refund-three|refund-large');
   process.exit(1);
 }
 
@@ -44,7 +50,14 @@ try {
   let invocationId: string | undefined;
   try {
     const result = await runtime.invoke(
-      { scope: 'playground-demo', prompt: PROMPT, maxAttempts: 1 },
+      {
+        scope: 'playground-demo',
+        prompt:
+          scenario === 'refund-large'
+            ? 'Refund ord_08 ($200.00) in full immediately.'
+            : PROMPT,
+        maxAttempts: 1,
+      },
       { pollIntervalMs: 50, waitTimeoutMs: 120_000 },
     );
     invocationId = result.invocationId;
@@ -57,11 +70,61 @@ try {
     ) {
       invocationId = error.diagnostics.invocationId;
     }
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+    if (
+      scenario === 'refund-large' &&
+      error instanceof AgentRuntimeError &&
+      error.diagnostics.code === 'approval_required' &&
+      invocationId
+    ) {
+      try {
+        const pending = (await runtime.getInvocation(invocationId))
+          ?.pendingToolCall;
+        if (!pending) throw new Error('Pending tool call not found');
+        console.log(
+          `[approval] ${pending.toolName} ${JSON.stringify(pending.input)}`,
+        );
+        const readline = createInterface({ input: stdin, output: stdout });
+        let answer: string;
+        try {
+          answer = await readline.question('Approve this refund? [y/N] ');
+        } finally {
+          readline.close();
+        }
+        if (answer.trim().toLowerCase() === 'y') {
+          await runtime.approveInvocation(invocationId, {
+            resolvedBy: 'playground',
+          });
+          const result = await runtime.waitForInvocation(invocationId, {
+            pollIntervalMs: 50,
+            waitTimeoutMs: 120_000,
+          });
+          console.log('\n[reply]');
+          console.log(result.text);
+        } else {
+          await runtime.rejectInvocation(invocationId, {
+            resolvedBy: 'playground',
+          });
+          console.log('[approval] Rejected.');
+        }
+      } catch (approvalError) {
+        console.error(
+          approvalError instanceof Error
+            ? approvalError.message
+            : approvalError,
+        );
+        process.exitCode = 1;
+      }
+    } else {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
   } finally {
     try {
-      if (invocationId) await printVerification(db, invocationId);
+      if (invocationId) {
+        if (scenario === 'refund-large')
+          await printLargeVerification(db, invocationId);
+        else await printVerification(db, invocationId);
+      }
     } finally {
       await worker.stop();
       await db.close();
@@ -69,6 +132,35 @@ try {
   }
 } finally {
   await mcp.close();
+}
+
+async function printLargeVerification(
+  db: DatabaseHandle,
+  invocationId: string,
+): Promise<void> {
+  const refunds = await db.pool.query(
+    "select id, order_id, amount::text as amount from refunds where order_id = 'ord_08' order by id",
+  );
+  const decisions = await db.pool.query(
+    "select rule, decision, tool_name, detail from agent_runtime.policy_decisions where invocation_id = $1 and rule = 'require_approval' order by id",
+    [invocationId],
+  );
+  const invocation = await db.pool.query(
+    'select status from agent_runtime.invocations where id = $1',
+    [invocationId],
+  );
+  console.log('\n[audit] what landed in Postgres:');
+  for (const row of refunds.rows)
+    console.log(
+      `  refund id=${row.id} order=${row.order_id} amount=${row.amount}`,
+    );
+  for (const row of decisions.rows)
+    console.log(
+      `  policy_decision invocation=${invocationId} rule=${row.rule} decision=${row.decision} tool=${row.tool_name ?? ''} detail=${JSON.stringify(row.detail)}`,
+    );
+  console.log(
+    `  invocation ${invocationId}: status=${invocation.rows[0]?.status}`,
+  );
 }
 
 async function printVerification(

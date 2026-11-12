@@ -13,6 +13,12 @@ import { tools } from './tools.js';
 
 const TOOL_NAMES = tools.map((tool) => tool.name);
 
+function refundAmount(input: unknown): number {
+  if (typeof input !== 'object' || input === null || !('amount' in input))
+    return 0;
+  return typeof input.amount === 'number' ? input.amount : 0;
+}
+
 export async function createPlaygroundRuntime(input: {
   connectionString: string;
   mcpUrl: string;
@@ -37,6 +43,9 @@ export async function createPlaygroundRuntime(input: {
       exactlyOneToolCallPerStep: true,
       correctionBudget: 3,
       toolAllowlist: TOOL_NAMES,
+      requireApproval: (call) =>
+        call.toolName === 'delete_customer' ||
+        (call.toolName === 'issue_refund' && refundAmount(call.input) > 50),
       maxToolCallsPerInvocation: 12,
       maxDurationMs: 120_000,
     },
