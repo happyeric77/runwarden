@@ -61,7 +61,7 @@ try {
           scenario === 'refund-large'
             ? 'Refund ord_08 ($200.00) in full immediately.'
             : scenario === 'email-claim'
-              ? 'Refund ord_03 ($30.00) in full, then email the customer to let them know, and confirm to me once both are done.'
+              ? 'Refund ord_03 ($50.00) in full, then email the customer to let them know, and confirm to me once both are done.'
               : scenario === 'ask'
                 ? process.argv[3]!
                 : PROMPT,

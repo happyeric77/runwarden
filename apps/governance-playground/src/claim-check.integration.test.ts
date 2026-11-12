@@ -56,7 +56,7 @@ it.each([false, true])(
                   type: 'tool-call',
                   toolCallId: 'refund',
                   toolName: 'issue_refund',
-                  input: JSON.stringify({ orderId: 'ord_03', amount: 30 }),
+                  input: JSON.stringify({ orderId: 'ord_03', amount: 50 }),
                 },
               ]
             : current === 1 && sendEmail
@@ -66,7 +66,7 @@ it.each([false, true])(
                     toolCallId: 'email',
                     toolName: 'send_email_to_customer',
                     input: JSON.stringify({
-                      customerId: 'cus_01',
+                      customerId: 'cus_03',
                       subject: 'Refund',
                       body: 'Done',
                     }),

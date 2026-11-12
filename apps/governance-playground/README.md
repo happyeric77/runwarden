@@ -85,4 +85,4 @@ With the database and `pnpm feed` running, open the feed and run `pnpm play emai
 
 For free input, run `pnpm play ask "Your request here"`. Different models can behave differently: if the email really was recorded, the check shows `VERIFIED`. The checker uses database audit and sandbox evidence, not guesses about intent. The sandbox records emails; it does not actually deliver them.
 
-The seeded `ord_03` total is $50 and belongs to `cus_03`, so the scenario's requested $30 refund is partial despite its wording.
+The seeded `ord_03` total is $50 and belongs to `cus_03`, so the scenario requests a full refund.
