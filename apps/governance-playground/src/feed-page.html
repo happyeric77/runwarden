@@ -87,6 +87,16 @@
       .gate strong { writing-mode: vertical-rl; text-orientation: upright; font-size: 14px; letter-spacing: 5px; }
       #denied-stamp { position: absolute; top: 85px; left: -43px; transform: rotate(-13deg); border: 3px solid #f0564f; color: #f0564f; background: #301b28; border-radius: 7px; padding: 8px 12px; font-size: 24px; font-weight: 900; letter-spacing: 2px; z-index: 1; }
       #chips { max-width: 260px; }
+      .gate-area { overflow: hidden; }
+      .gate.open { border-color: #35c26e; background: #16372e; }
+      #chips { width: 260px; min-height: 220px; }
+      #chips .chip { position: relative; }
+      #playback-controls { display: flex; align-items: center; gap: 16px; }
+      button { background: #203653; border: 1px solid #57a8ff; color: #e8eef9; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+      #playback-label { color: #93a5c4; font-size: 12px; }
+      #record { border-top: 1px solid #2a3a5f; margin-top: 24px; padding-top: 18px; }
+      #record p { font-family: monospace; font-size: 11px; }
+      #correction { color: #f5b544; border-left: 3px solid #f5b544; padding-left: 12px; }
       .chip { display: block; background: #1b2c49; border: 1px solid #57a8ff; border-radius: 8px; padding: 9px 12px; margin: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
       .chip.deny { border-color: #f0564f; color: #f0564f; }
       .chip.succeeded { border-color: #35c26e; color: #35c26e; }
@@ -116,8 +126,10 @@
         <article class="card"><h3>Email claim</h3><p>Check what actually happened.</p><code>pnpm play email-claim</code></article>
       </section><section class="panel"><h2>The Agent</h2><span class="agent-badge">AI AGENT</span><span class="bad-habits">BAD HABITS: ON</span></section></aside>
       <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div></section>
-      <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol></section>
+      <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol><section id="record"><h2>Record</h2><div id="record-lines"></div></section></section>
     </main>
+    <div id="playback-controls"><button id="replay" type="button" disabled>Replay case</button><span id="playback-label">Waiting for evidence. Playback does not execute tools.</span></div>
+    <p id="correction" hidden></p>
     <details id="evidence"><summary>Evidence</summary>
     <p id="stats">Loading statistics...</p>
     <section id="pending" hidden>
@@ -129,6 +141,79 @@
     </details>
     <script>
       const list = document.querySelector('#events');
+      let currentCase;
+      let lastSignature = '';
+      let playbackGeneration = 0;
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
+      document.querySelector('#replay').addEventListener('click', () => currentCase && playCase(currentCase));
+      async function playCase(current) {
+        const generation = ++playbackGeneration;
+        const live = () => generation === playbackGeneration;
+        const orders = current.orders.map((order) => ({ ...order, status: 'PLACED' }));
+        const judge = [];
+        const chips = [];
+        const record = document.querySelector('#record-lines');
+        record.replaceChildren();
+        document.querySelector('#correction').hidden = true;
+        document.querySelector('.gate').classList.remove('open');
+        document.querySelector('#playback-label').textContent = 'Playing recorded evidence · not live tool execution';
+        renderStage({ ...current, orders, judge, chips });
+        await pause(800);
+        for (const text of current.judge) {
+          if (!live()) return;
+          if (/\bdenied\b/i.test(text)) {
+            chips.push(...current.chips.filter((chip) => /\bdeny\b/i.test(chip)));
+            renderStage({ ...current, orders, judge, chips });
+            const tokens = [...document.querySelectorAll('#chips .chip')];
+            await Promise.all(tokens.map((token) => token.animate([{ transform: 'translateX(-180px)', opacity: 0 }, { transform: 'translateX(0)', opacity: 1 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000, fill: 'both' }).finished));
+            if (!live()) return;
+          }
+          if (/^Executed:/.test(text)) {
+            const order = orders.find((order) => text === `Executed: issue_refund ${order.orderId}.`);
+            const token = document.createElement('span');
+            token.className = 'chip succeeded';
+            token.textContent = order ? `issue_refund ${order.orderId}` : text;
+            document.querySelector('#chips').replaceChildren(token);
+            document.querySelector('.gate').classList.add('open');
+            await token.animate([{ transform: 'translateX(-100px)', opacity: 1 }, { transform: 'translateX(240px)', opacity: 0 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1200, fill: 'both' }).finished;
+            if (!live()) return;
+            if (order) order.status = current.orders.find((item) => item.orderId === order.orderId).status;
+            const row = document.createElement('p'); row.textContent = text; record.append(row);
+          }
+          if (/correction/i.test(text)) {
+            document.querySelector('#correction').textContent = text;
+            document.querySelector('#correction').hidden = false;
+          }
+          judge.push(text);
+          renderStage({ ...current, orders, judge, chips });
+          await pause(/^Case closed:/.test(text) ? 0 : 1000);
+        }
+        if (!live()) return;
+        renderStage(current);
+        document.querySelector('#playback-label').textContent = 'Recorded evidence complete · Replay case to watch again';
+      }
+      function renderStage(current) {
+        document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
+        document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
+          const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;
+          for (const [className, text] of [['order-id', order.orderId], ['amount', order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)], ['order-state', order.status]]) {
+            const label = document.createElement('span'); label.className = className; label.textContent = text; card.append(label);
+          }
+          return card;
+        }));
+        document.querySelector('#chips').replaceChildren(...(current?.chips ?? []).map((text) => {
+          const chip = document.createElement('span'); chip.className = 'chip';
+          if (/\bdeny\b/i.test(text)) chip.classList.add('deny');
+          else if (/\bsucceeded\b/i.test(text)) chip.classList.add('succeeded');
+          else if (/correction|parked|approval_requested/i.test(text)) chip.classList.add('parked');
+          chip.textContent = text; return chip;
+        }));
+        document.querySelector('#verdicts').replaceChildren(...(current?.judge ?? []).map((text) => {
+          const item = document.createElement('li');
+          item.className = /^Case closed:/.test(text) ? 'closed' : /\bdenied\b/i.test(text) ? 'denied' : /correction|parked/i.test(text) ? 'correction' : /^Executed:/.test(text) ? 'executed' : '';
+          item.textContent = text; return item;
+        }));
+      }
       async function refresh() {
         try {
           const response = await fetch('/api/events', { cache: 'no-store' });
@@ -139,28 +224,16 @@
           const { cases } = await casesResponse.json();
           const current = cases[0];
           document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'WAITING FOR CASE';
-          document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
+          currentCase = current;
+          document.querySelector('#replay').disabled = !current;
           document.querySelector('#burst').classList.toggle('active', !!current?.judge.some((line) => line.startsWith('Agent tried ')));
           document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'Waiting for a case.';
-          document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
-            const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;
-            for (const [className, text] of [['order-id', order.orderId], ['amount', order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)], ['order-state', order.status]]) {
-              const label = document.createElement('span'); label.className = className; label.textContent = text; card.append(label);
-            }
-            return card;
-          }));
-          document.querySelector('#chips').replaceChildren(...(current?.chips ?? []).map((text) => {
-            const chip = document.createElement('span'); chip.className = 'chip';
-            if (/\bdeny\b/i.test(text)) chip.classList.add('deny');
-            else if (/\bsucceeded\b/i.test(text)) chip.classList.add('succeeded');
-            else if (/correction|parked|approval_requested/i.test(text)) chip.classList.add('parked');
-            chip.textContent = text; return chip;
-          }));
-          document.querySelector('#verdicts').replaceChildren(...(current?.judge ?? []).map((text) => {
-            const item = document.createElement('li');
-            item.className = /^Case closed:/.test(text) ? 'closed' : /\bdenied\b/i.test(text) ? 'denied' : /correction|parked/i.test(text) ? 'correction' : /^Executed:/.test(text) ? 'executed' : '';
-            item.textContent = text; return item;
-          }));
+          const signature = JSON.stringify(current);
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            if (current) playCase(current).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
+            else { playbackGeneration++; renderStage(null); }
+          }
           document.querySelector('#stats').textContent =
             `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
           document.querySelector('#pending').hidden =
