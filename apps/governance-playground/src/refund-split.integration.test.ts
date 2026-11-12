@@ -10,6 +10,7 @@ import { runWorker } from 'runwarden';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 
 import { startPlaygroundMcpServer } from './mcp-server.js';
+import { checkRefundThree } from './claim-check.js';
 import { createPlaygroundRuntime } from './runtime.js';
 import { seed } from './seed.js';
 
@@ -129,6 +130,18 @@ it('splits a three-refund burst into single calls (fake model)', async () => {
       [result.invocationId],
     );
     expect(corrections.rowCount).toBeGreaterThan(0);
+    expect(
+      await checkRefundThree(started.db, result.invocationId),
+    ).toMatchObject({ verified: true });
+    await started.db.pool.query(
+      "delete from refunds where order_id = 'ord_06'",
+    );
+    expect(
+      await checkRefundThree(started.db, result.invocationId),
+    ).toMatchObject({
+      verified: false,
+      evidence: expect.stringContaining('ord_06 $15.00'),
+    });
   } finally {
     await worker.stop();
     await started.db.close();

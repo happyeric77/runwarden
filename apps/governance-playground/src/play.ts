@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline/promises';
 
 import { AgentRuntimeError, runWorker, type DatabaseHandle } from 'runwarden';
 
-import { checkClaims, formatClaims } from './claim-check.js';
+import { checkClaims, checkRefundThree, formatClaims } from './claim-check.js';
 import { startPlaygroundMcpServer } from './mcp-server.js';
 import { createPlaygroundRuntime } from './runtime.js';
 import { seed } from './seed.js';
@@ -70,12 +70,20 @@ try {
       { pollIntervalMs: 50, waitTimeoutMs: 120_000 },
     );
     invocationId = result.invocationId;
-    console.log('\n[reply]');
+    console.log('\n[model reply: unverified until checked against evidence]');
     console.log(result.text);
-    if (scenario === 'email-claim' || scenario === 'ask') {
+    if (
+      scenario === 'refund-three' ||
+      scenario === 'email-claim' ||
+      scenario === 'ask'
+    ) {
       console.log('\n[claim check]');
       console.log(
-        formatClaims(await checkClaims(db, invocationId, result.text)),
+        formatClaims(
+          scenario === 'refund-three'
+            ? [await checkRefundThree(db, invocationId)]
+            : await checkClaims(db, invocationId, result.text),
+        ),
       );
     }
   } catch (error) {
@@ -113,7 +121,9 @@ try {
             pollIntervalMs: 50,
             waitTimeoutMs: 120_000,
           });
-          console.log('\n[reply]');
+          console.log(
+            '\n[model reply: unverified until checked against evidence]',
+          );
           console.log(result.text);
         } else {
           await runtime.rejectInvocation(invocationId, {

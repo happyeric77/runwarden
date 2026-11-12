@@ -65,3 +65,35 @@ export function formatClaims(results: ClaimResult[]): string {
     )
     .join('\n');
 }
+
+export async function checkRefundThree(
+  db: DatabaseHandle,
+  invocationId: string,
+): Promise<ClaimResult> {
+  const { rows } = await db.pool.query<{ order_id: string; amount: string }>(
+    `select request_snapshot->>'orderId' as order_id,
+            request_snapshot->>'amount' as amount
+       from agent_runtime.tool_call_audits
+      where invocation_id = $1 and tool_name = 'issue_refund' and status = 'succeeded'
+        and exists (select 1 from refunds r
+          where r.order_id = request_snapshot->>'orderId'
+            and r.amount = (request_snapshot->>'amount')::numeric)`,
+    [invocationId],
+  );
+  const expected = [
+    ['ord_01', 25],
+    ['ord_02', 49.5],
+    ['ord_06', 15],
+  ] as const;
+  const missing = expected.filter(
+    ([id, amount]) =>
+      !rows.some((row) => row.order_id === id && Number(row.amount) === amount),
+  );
+  return {
+    claim: 'refund',
+    verified: missing.length === 0,
+    evidence: missing.length
+      ? `missing succeeded refund audits: ${missing.map(([id, amount]) => `${id} $${amount.toFixed(2)}`).join(', ')}`
+      : 'all three order IDs and full amounts verified in invocation audits and refunds',
+  };
+}

@@ -55,6 +55,17 @@ it('groups a denied burst and three successful refunds into a case', () => {
     'Executed: issue_refund ord_06.',
     'Case closed: 3 refunds, 3 audit rows.',
   ]);
+  const noExecutions = events.filter((event) => event.kind !== 'audit');
+  expect(buildCases(noExecutions)[0]!.judge.at(-1)).toBe(
+    'CLAIM UNVERIFIED: model replied, but no tool execution succeeded.',
+  );
+  expect(
+    buildCases(
+      noExecutions.map((event) =>
+        event.kind === 'invocation' ? { ...event, status: 'failed' } : event,
+      ),
+    )[0]!.judge.at(-1),
+  ).toBe('Case failed: invocation failed. Check Evidence.');
 });
 
 it('serves a read-only, ordered feed and global counts without a model', async () => {

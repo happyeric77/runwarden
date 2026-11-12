@@ -99,14 +99,23 @@ export function buildCases(events: CaseEvent[]) {
             );
         }
       }
-      if (invocation?.status === 'succeeded') {
+      if (
+        invocation?.status === 'failed' ||
+        invocation?.status === 'cancelled'
+      ) {
+        judge.push(
+          `Case failed: invocation ${invocation.status}. Check Evidence.`,
+        );
+      } else if (invocation?.status === 'succeeded') {
         const audits = rawEvents.filter((event) => event.kind === 'audit');
         const refunds = audits.filter(
           (event) =>
             event.tool === 'issue_refund' && event.status === 'succeeded',
         ).length;
         judge.push(
-          `Case closed: ${refunds} refunds, ${audits.length} audit rows.`,
+          audits.some((event) => event.status === 'succeeded')
+            ? `Case closed: ${refunds} refunds, ${audits.length} audit rows.`
+            : 'CLAIM UNVERIFIED: model replied, but no tool execution succeeded.',
         );
       }
       return {

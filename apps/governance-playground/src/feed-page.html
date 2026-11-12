@@ -210,7 +210,7 @@
         }));
         document.querySelector('#verdicts').replaceChildren(...(current?.judge ?? []).map((text) => {
           const item = document.createElement('li');
-          item.className = /^Case closed:/.test(text) ? 'closed' : /\bdenied\b/i.test(text) ? 'denied' : /correction|parked/i.test(text) ? 'correction' : /^Executed:/.test(text) ? 'executed' : '';
+          item.className = /^Case closed:/.test(text) ? 'closed' : /\bdenied\b|^Case failed:|CLAIM UNVERIFIED/i.test(text) ? 'denied' : /correction|parked/i.test(text) ? 'correction' : /^Executed:/.test(text) ? 'executed' : '';
           item.textContent = text; return item;
         }));
       }
