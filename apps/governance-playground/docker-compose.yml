@@ -15,5 +15,19 @@ services:
       timeout: 5s
       retries: 30
 
+  feed:
+    build:
+      context: ../..
+      dockerfile: apps/governance-playground/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/governance_playground
+      FEED_HOST: 0.0.0.0
+      FEED_PORT: 43123
+    ports:
+      - '43123:43123'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   gp-postgres:

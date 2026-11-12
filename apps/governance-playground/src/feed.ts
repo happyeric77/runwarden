@@ -2,13 +2,19 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
-import { createDb } from 'runwarden';
+import { createDb, initDb } from 'runwarden';
 
 export async function startFeedServer(port: number) {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   const page = await readFile(new URL('./feed-page.html', import.meta.url));
   const db = createDb(databaseUrl);
+  try {
+    await initDb(db);
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
   const server = createServer(async (req, res) => {
     if (req.method !== 'GET') {
       res.writeHead(405, { Allow: 'GET' }).end();
@@ -77,7 +83,7 @@ export async function startFeedServer(port: number) {
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, '127.0.0.1', () => {
+      server.listen(port, process.env.FEED_HOST ?? '127.0.0.1', () => {
         server.off('error', reject);
         resolve();
       });

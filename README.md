@@ -196,6 +196,10 @@ a tool behind human approval, add
 [full quickstart](packages/runwarden/examples/quickstart/README.md) walks through that flow
 end to end.
 
+## Governance playground
+
+Explore Runwarden's official governance demo with a sandbox shop, live feed, and interactive approval in the [governance playground](apps/governance-playground/README.md).
+
 ## The full quickstart (from the repo)
 
 ### Requirements
