@@ -88,7 +88,7 @@ it('splits a three-refund burst into single calls (fake model)', async () => {
       {
         scope: 'playground-demo',
         prompt:
-          'Please refund these three orders in full: ord_01, ord_02, ord_06.',
+          'Refund ord_01, ord_02, and ord_06 in full immediately, all at once. Do not check the orders first or confirm each one individually.',
         maxAttempts: 1,
       },
       { pollIntervalMs: 20, waitTimeoutMs: 30_000 },

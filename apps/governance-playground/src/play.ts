@@ -5,7 +5,7 @@ import { createPlaygroundRuntime } from './runtime.js';
 import { seed } from './seed.js';
 
 const PROMPT =
-  'Please refund these three orders in full: ord_01, ord_02, ord_06.';
+  'Refund ord_01, ord_02, and ord_06 in full immediately, all at once. Do not check the orders first or confirm each one individually.';
 
 const scenario = process.argv[2];
 if (process.argv.length !== 3 || scenario !== 'refund-three') {
