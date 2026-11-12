@@ -1,6 +1,6 @@
 # Governance playground
 
-Sandbox shop for governance scenarios. Slice 1 runs one governed refund. Approval, live feed, and free input come later.
+Sandbox shop for governance scenarios. Slice 1 runs governed refunds and Slice 2 adds a read-only live feed. Approval and free input come later.
 
 ## Database
 
@@ -48,3 +48,21 @@ pnpm play refund-three
 `MODEL_BASE_URL` defaults to `https://api.openai.com/v1` and `MODEL_ID` defaults to `gpt-4o-mini`. `MODEL_API_KEY` is required. Only the scenario name `refund-three` is accepted.
 
 The terminal prints each policy decision as it happens (`rule`, `decision`, `toolName`). The first step is denied and split. After the run, the process prints the assistant reply, then the new refund rows, the tool call audits for this invocation, and the exactly-one policy decisions.
+
+## Slice 2: live feed
+
+Build once from the repo root with `pnpm build`. Start the database as above, and set `DATABASE_URL` in both terminals. From this directory, start the feed in one terminal:
+
+```sh
+pnpm feed
+```
+
+Open http://localhost:43123. Set `FEED_PORT` to change the port. In a second terminal, set the model environment variables as in Slice 1 and run:
+
+```sh
+pnpm play refund-three
+```
+
+The read-only page refreshes every two seconds. When a model proposes a batch, deny decisions appear red, corrections yellow, and successful audits green as the run proceeds. The feed shows each invocation and audit's current state, not a complete history of their state changes.
+
+Model behavior varies: in Eric's tests, gpt-6-luna did not batch calls, while qwen3.5 on Ollama did. Use a model that batches to see the split. Warm up a local Ollama model before running: a cold start can hit the 120-second limit.

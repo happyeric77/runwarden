@@ -12,7 +12,8 @@
     "format:check": "prettier --check '**/*.{ts,json,md}'",
     "seed": "tsx src/seed.ts",
     "mcp": "tsx src/mcp-server.ts",
-    "play": "tsx src/play.ts"
+    "play": "tsx src/play.ts",
+    "feed": "tsx src/feed.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
