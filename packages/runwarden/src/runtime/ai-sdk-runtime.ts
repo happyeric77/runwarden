@@ -278,10 +278,22 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         stopWhen: () => policy.terminalError != null,
       });
 
-      const result = await agent.generate({
-        messages: modelMessages(history, input),
+      // The SDK stops on text-only responses even while a correction is pending.
+      // Resume the same conversation, not the invocation or its executed tools.
+      const messages = modelMessages(history, input);
+      let result = await agent.generate({
+        messages,
         timeout: this.remaining(startedAt),
       });
+      const steps = [...result.steps];
+      while (!policy.terminalError && policy.correctionInstruction()) {
+        messages.push(...result.response.messages);
+        result = await agent.generate({
+          messages,
+          timeout: this.remaining(startedAt),
+        });
+        steps.push(...result.steps);
+      }
 
       if (policy.terminalError) throw policy.terminalError;
       const text = result.text.trim();
@@ -301,7 +313,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         contextLoadMs: contextLoadedAt - startedAt,
         historyLoadMs: historyLoadedAt - contextLoadedAt,
         toolCallCount: state.toolCallCount,
-        ...aggregateStepTimings(result.steps),
+        ...aggregateStepTimings(steps),
         totalMs: completedAt - startedAt,
       });
 

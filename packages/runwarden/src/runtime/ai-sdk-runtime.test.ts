@@ -233,6 +233,55 @@ function runtime(
 }
 
 describe('AiSdkNativeRuntime', () => {
+  it('continues after text evades correction without repeating executed tools', async () => {
+    const subject = runtime(
+      [
+        toolStep(toolCall('first', directoryTools.get, { recordId: 1 })),
+        toolStep(
+          toolCall('burst-2', directoryTools.get, { recordId: 2 }),
+          toolCall('burst-3', directoryTools.get, { recordId: 3 }),
+        ),
+        textStep('Done! All three processed.'),
+        toolStep(toolCall('second', directoryTools.get, { recordId: 2 })),
+        toolStep(toolCall('third', directoryTools.get, { recordId: 3 })),
+        textStep('Actually completed.'),
+      ],
+      { policies: { correctionBudget: 3 } },
+    );
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Actually completed.',
+    });
+    expect(
+      subject.callTool.mock.calls.map(([call]) => call.arguments.recordId),
+    ).toEqual([1, 2, 3]);
+    expect(JSON.stringify(subject.model.doGenerateCalls[3]?.prompt)).toContain(
+      'Done! All three processed.',
+    );
+  });
+
+  it('fails after bounded text-only corrections with zero executions', async () => {
+    const onPolicyDecision = vi.fn();
+    const subject = runtime(
+      [
+        toolStep(
+          toolCall('a', directoryTools.get, { recordId: 1 }),
+          toolCall('b', directoryTools.get, { recordId: 2 }),
+        ),
+        textStep('Done!'),
+        textStep('Done!'),
+        textStep('Done!'),
+      ],
+      { policies: { correctionBudget: 3 }, onPolicyDecision },
+    );
+    await expect(subject.instance.invoke(invocation)).rejects.toThrow(
+      'Provider did not return a corrected tool call',
+    );
+    expect(subject.callTool).not.toHaveBeenCalled();
+    expect(subject.model.doGenerateCalls).toHaveLength(4);
+    expect(onPolicyDecision).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'correction_budget', decision: 'deny' }),
+    );
+  });
   it.each([
     [
       { nested: { a: 1, b: 2 }, values: [1, 2] },
