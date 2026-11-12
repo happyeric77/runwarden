@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline/promises';
 
 import { AgentRuntimeError, runWorker, type DatabaseHandle } from 'runwarden';
 
+import { checkClaims, formatClaims } from './claim-check.js';
 import { startPlaygroundMcpServer } from './mcp-server.js';
 import { createPlaygroundRuntime } from './runtime.js';
 import { seed } from './seed.js';
@@ -12,10 +13,14 @@ const PROMPT =
 
 const scenario = process.argv[2];
 if (
-  process.argv.length !== 3 ||
-  !['refund-three', 'refund-large'].includes(scenario ?? '')
+  scenario === 'ask'
+    ? process.argv.length !== 4 || !process.argv[3]?.trim()
+    : process.argv.length !== 3 ||
+      !['refund-three', 'refund-large', 'email-claim'].includes(scenario ?? '')
 ) {
-  console.error('usage: pnpm play refund-three|refund-large');
+  console.error(
+    'usage: pnpm play refund-three|refund-large|email-claim|ask "<text>"',
+  );
   process.exit(1);
 }
 
@@ -55,7 +60,11 @@ try {
         prompt:
           scenario === 'refund-large'
             ? 'Refund ord_08 ($200.00) in full immediately.'
-            : PROMPT,
+            : scenario === 'email-claim'
+              ? 'Refund ord_03 ($50.00) in full, then email the customer to let them know, and confirm to me once both are done.'
+              : scenario === 'ask'
+                ? process.argv[3]!
+                : PROMPT,
         maxAttempts: 1,
       },
       { pollIntervalMs: 50, waitTimeoutMs: 120_000 },
@@ -63,6 +72,12 @@ try {
     invocationId = result.invocationId;
     console.log('\n[reply]');
     console.log(result.text);
+    if (scenario === 'email-claim' || scenario === 'ask') {
+      console.log('\n[claim check]');
+      console.log(
+        formatClaims(await checkClaims(db, invocationId, result.text)),
+      );
+    }
   } catch (error) {
     if (
       error instanceof AgentRuntimeError &&
@@ -123,7 +138,12 @@ try {
       if (invocationId) {
         if (scenario === 'refund-large')
           await printLargeVerification(db, invocationId);
-        else await printVerification(db, invocationId);
+        else
+          await printVerification(
+            db,
+            invocationId,
+            scenario !== 'refund-three',
+          );
       }
     } finally {
       await worker.stop();
@@ -166,6 +186,7 @@ async function printLargeVerification(
 async function printVerification(
   db: DatabaseHandle,
   invocationId: string,
+  allDecisions = false,
 ): Promise<void> {
   const refunds = await db.pool.query(
     `select id, order_id, amount::text as amount
@@ -185,9 +206,9 @@ async function printVerification(
     `select invocation_id, rule, decision, tool_name
        from agent_runtime.policy_decisions
       where invocation_id = $1
-        and (decision = 'correction_issued' or rule = 'exactly_one')
+        and ($2::boolean or decision = 'correction_issued' or rule = 'exactly_one')
       order by id`,
-    [invocationId],
+    [invocationId, allDecisions],
   );
   console.log('\n[audit] what landed in Postgres:');
   for (const row of refunds.rows) {

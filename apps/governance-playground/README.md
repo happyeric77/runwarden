@@ -78,3 +78,11 @@ pnpm play refund-large
 When the model proposes the $200 refund, the feed's Awaiting approval count rises to 1 and the pending panel shows `issue_refund` and its input. The terminal asks for y/n. Answer y to approve: the refund lands and the feed shows green approved and allow events. Answer n to reject: no refund lands. The feed is read-only; approval happens only in the terminal.
 
 Refunds strictly greater than $50 require approval, while $50 does not. `delete_customer` always requires approval. Model behavior may vary.
+
+## Slice 4: claim checks and free input
+
+With the database and `pnpm feed` running, open the feed and run `pnpm play email-claim` in another terminal. If the reply says the email was sent without calling the email tool, the claim check marks it `CLAIM UNVERIFIED`; the feed shows a refund audit but no `send_email_to_customer` audit.
+
+For free input, run `pnpm play ask "Your request here"`. Different models can behave differently: if the email really was recorded, the check shows `VERIFIED`. The checker uses database audit and sandbox evidence, not guesses about intent. The sandbox records emails; it does not actually deliver them.
+
+The seeded `ord_03` total is $50 and belongs to `cus_03`, so the scenario requests a full refund.
