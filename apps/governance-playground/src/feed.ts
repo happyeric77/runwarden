@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url';
 
 import { createDb, initDb } from 'runwarden';
 
+import { buildCases, type CaseEvent } from './cases.js';
+
 export async function startFeedServer(port: number) {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
@@ -26,11 +28,35 @@ export async function startFeedServer(port: number) {
         .end(page);
       return;
     }
-    if (req.url !== '/api/events') {
+    if (req.url !== '/api/events' && req.url !== '/api/cases') {
       res.writeHead(404).end();
       return;
     }
     try {
+      if (req.url === '/api/cases') {
+        const { rows } = await db.pool.query<CaseEvent>(`
+          select * from (
+            select created_at as at, 'invocation' as kind, id::text as "invocationId",
+                   null::text as tool, null::text as rule, null::text as decision,
+                   status::text as status, null::jsonb as snapshot
+              from agent_runtime.invocations
+            union all
+            select created_at, 'decision', invocation_id::text, tool_name, rule, decision,
+                   null::text, null::jsonb from agent_runtime.policy_decisions
+            union all
+            select coalesce(completed_at, requested_at), 'audit', invocation_id::text, tool_name,
+                   null::text, null::text, status::text, request_snapshot
+              from agent_runtime.tool_call_audits
+          ) events order by at asc
+        `);
+        res
+          .writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          })
+          .end(JSON.stringify({ cases: buildCases(rows) }));
+        return;
+      }
       const events = await db.pool.query(`
         select * from (
           (select updated_at as at, 'invocation' as kind, id::text as "invocationId",

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Governance live feed</title>
+    <title>Governance Demo Stage</title>
     <style>
       body {
         background: #101720;
@@ -57,10 +57,27 @@
       .green {
         background: #17663a;
       }
+      .stage { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 20px; }
+      .panel, .card, .gate { background: #1c2938; border: 1px solid #40546a; border-radius: 10px; padding: 16px; margin-bottom: 12px; }
+      .active { border-color: #66dda2; }
+      .gate { text-align: center; border-color: #eac76b; }
+      .chip { display: inline-block; background: #475569; border-radius: 20px; padding: 5px 10px; margin: 4px; }
+      code { overflow-wrap: anywhere; }
+      @media (max-width: 760px) { .stage { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
-    <h1>Governance live feed</h1>
+    <h1>Governance Demo Stage</h1>
+    <main class="stage">
+      <section class="panel" id="missions"><h2>Missions</h2>
+        <article class="card" id="burst"><h3>Burst refunds</h3><p>Three refunds meet the policy gate.</p><code>pnpm play refund-three</code></article>
+        <article class="card"><h3>Big refund</h3><p>A large refund awaits approval.</p><code>pnpm play refund-large</code></article>
+        <article class="card"><h3>Email claim</h3><p>Check what actually happened.</p><code>pnpm play email-claim</code></article>
+      </section>
+      <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate"><strong>Policy Gate</strong><div id="chips"></div></div></section>
+      <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol></section>
+    </main>
+    <details id="evidence"><summary>Evidence</summary>
     <p id="stats">Loading statistics...</p>
     <section id="pending" hidden>
       <h2>Pending approvals</h2>
@@ -68,6 +85,7 @@
     </section>
     <p id="message" role="status"></p>
     <ul id="events" aria-label="Governance events"></ul>
+    </details>
     <script>
       const list = document.querySelector('#events');
       async function refresh() {
@@ -75,6 +93,23 @@
           const response = await fetch('/api/events', { cache: 'no-store' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const { events, stats, pendingApprovals } = await response.json();
+          const casesResponse = await fetch('/api/cases', { cache: 'no-store' });
+          if (!casesResponse.ok) throw new Error(`HTTP ${casesResponse.status}`);
+          const { cases } = await casesResponse.json();
+          const current = cases[0];
+          document.querySelector('#burst').classList.toggle('active', !!current?.judge.some((line) => line.startsWith('Agent tried ')));
+          document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'Waiting for a case.';
+          document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
+            const card = document.createElement('div'); card.className = 'card';
+            card.textContent = `${order.orderId} · ${order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)} · ${order.status}`;
+            return card;
+          }));
+          document.querySelector('#chips').replaceChildren(...(current?.chips ?? []).map((text) => {
+            const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = text; return chip;
+          }));
+          document.querySelector('#verdicts').replaceChildren(...(current?.judge ?? []).map((text) => {
+            const item = document.createElement('li'); item.textContent = text; return item;
+          }));
           document.querySelector('#stats').textContent =
             `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
           document.querySelector('#pending').hidden =
