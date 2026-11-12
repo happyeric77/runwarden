@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Governance live feed</title>
+    <style>
+      body {
+        background: #101720;
+        color: #e7edf5;
+        font:
+          16px system-ui,
+          sans-serif;
+        margin: 0 auto;
+        max-width: 1000px;
+        padding: 24px;
+      }
+      h1 {
+        margin-bottom: 8px;
+      }
+      #stats {
+        color: #bdc9d9;
+        line-height: 1.8;
+      }
+      #message {
+        color: #ffb4a9;
+      }
+      ul {
+        padding: 0;
+        list-style: none;
+      }
+      li {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 12px;
+        padding: 14px 10px;
+        border-bottom: 1px solid #344150;
+      }
+      time {
+        color: #bdc9d9;
+        font-variant-numeric: tabular-nums;
+      }
+      .badge {
+        border-radius: 4px;
+        padding: 3px 8px;
+        background: #475569;
+        color: white;
+        font-weight: 600;
+      }
+      .red {
+        background: #a82e2e;
+      }
+      .yellow {
+        background: #846000;
+      }
+      .green {
+        background: #17663a;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Governance live feed</h1>
+    <p id="stats">Loading statistics...</p>
+    <p id="message" role="status"></p>
+    <ul id="events" aria-label="Governance events"></ul>
+    <script>
+      const list = document.querySelector('#events');
+      async function refresh() {
+        try {
+          const response = await fetch('/api/events', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const { events, stats } = await response.json();
+          document.querySelector('#stats').textContent =
+            `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
+          const rows = events.map((event) => {
+            const row = document.createElement('li');
+            const time = document.createElement('time');
+            time.dateTime = event.at;
+            time.textContent = new Date(event.at).toLocaleString();
+            const badge = document.createElement('span');
+            badge.className = 'badge';
+            if (['deny', 'rejected'].includes(event.decision))
+              badge.classList.add('red');
+            else if (
+              ['correction_issued', 'approval_requested'].includes(
+                event.decision,
+              )
+            )
+              badge.classList.add('yellow');
+            else if (
+              ['allow', 'approved'].includes(event.decision) ||
+              (event.kind === 'audit' && event.status === 'succeeded')
+            )
+              badge.classList.add('green');
+            badge.textContent = event.kind;
+            const summary = document.createElement('span');
+            summary.textContent = event.summary;
+            row.append(time, badge, summary);
+            return row;
+          });
+          list.replaceChildren(...rows);
+          document.querySelector('#message').textContent = '';
+        } catch (error) {
+          document.querySelector('#message').textContent =
+            `Feed unavailable: ${error.message}`;
+        }
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>
