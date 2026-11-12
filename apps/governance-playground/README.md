@@ -1,88 +1,102 @@
 # Governance playground
 
-Sandbox shop for governance scenarios. Slice 1 runs governed refunds, Slice 2 adds a read-only live feed, and Slice 3 adds terminal approval. Free input comes later.
+An intentionally unruly agent meets Runwarden's real-time governance in a sandbox shop. All data is fictional and stored in local Postgres.
 
-## Database
+- A burst of three refunds is sent back to be called one at a time.
+- A large refund is parked until a person approves or rejects it.
+- A claimed email is checked against the audit trail and sandbox records.
 
-From this directory:
+## Quickstart
 
-```sh
-docker compose up -d --wait
-export DATABASE_URL=postgres://postgres:password@localhost:54331/governance_playground
-pnpm seed
-```
+You need Node.js 22 or newer, pnpm, Docker with Compose, and an OpenAI-compatible model endpoint and API key. From the repository root:
 
-Postgres is `postgres:16-alpine` on port 54331. Quickstart uses 54330 and the durable example uses 54329. Seed creates the runwarden schema, then the sandbox tables in `public`, then loads fixed rows. Running it again replaces those rows, so counts stay the same.
+1. Install host dependencies, build the core package for the host CLI, and start Postgres and the feed:
 
-## MCP server
+   ```sh
+   pnpm install
+   pnpm build
+   docker compose -f apps/governance-playground/docker-compose.yml up -d --build
+   ```
 
-```sh
-pnpm mcp
-```
+2. In the terminal where you will run the scenarios, export all five variables. Replace the model values with your endpoint, key, and model ID:
 
-Listens at `http://127.0.0.1:43122/mcp`. Set `MCP_PORT` to use another port. Requires `DATABASE_URL`. Tools: `list_orders`, `get_order`, `list_customers`, `get_customer`, `list_products`, `issue_refund`, `send_email_to_customer`, `cancel_order`, `delete_customer`.
+   ```sh
+   export DATABASE_URL=postgres://postgres:password@localhost:54331/governance_playground
+   export MODEL_BASE_URL=https://api.openai.com/v1
+   export MODEL_API_KEY=your-key
+   export MODEL_ID=your-model-id
+   export FEED_PORT=43123
+   ```
 
-## Tests
+3. Open the feed in a browser:
 
-```sh
-pnpm test
-```
+   ```sh
+   open http://localhost:43123
+   ```
 
-Shop and seed tests use embedded Postgres. Compose is not required. `pnpm typecheck` and `pnpm format:check` cover the package.
+   On Linux use `xdg-open http://localhost:43123` instead. The feed runs in Compose; scenarios run in this host terminal.
 
-## Slice 1: three refunds, split back to one call
+4. Run the three-refund scenario:
 
-The assistant is impatient and tries to refund three orders in one step. Policy sends that step back. The assistant then refunds one order at a time.
+   ```sh
+   pnpm --filter governance-playground play refund-three
+   ```
 
-From the repo root, run `pnpm build` once. This app imports the built `runwarden` package. Then, from this directory:
+5. Run the approval and claim-check scenarios. Answer `y` or `n` when prompted for approval:
 
-```sh
-docker compose up -d --wait
-export DATABASE_URL=postgres://postgres:password@localhost:54331/governance_playground
-export MODEL_BASE_URL=https://api.openai.com/v1
-export MODEL_API_KEY=your-key
-export MODEL_ID=gpt-4o-mini
-pnpm play refund-three
-```
+   ```sh
+   pnpm --filter governance-playground play refund-large
+   pnpm --filter governance-playground play email-claim
+   ```
 
-`MODEL_BASE_URL` defaults to `https://api.openai.com/v1` and `MODEL_ID` defaults to `gpt-4o-mini`. `MODEL_API_KEY` is required. The scenarios are `refund-three` and `refund-large`.
+Stop the stack with `docker compose -f apps/governance-playground/docker-compose.yml down`. Each scenario resets the sandbox shop data before running; do not use this database for real data.
 
-The terminal prints each policy decision as it happens (`rule`, `decision`, `toolName`). The first step is denied and split. After the run, the process prints the assistant reply, then the new refund rows, the tool call audits for this invocation, and the exactly-one policy decisions.
-
-## Slice 2: live feed
-
-Build once from the repo root with `pnpm build`. Start the database as above, and set `DATABASE_URL` in both terminals. From this directory, start the feed in one terminal:
-
-```sh
-pnpm feed
-```
-
-Open http://localhost:43123. Set `FEED_PORT` to change the port. In a second terminal, set the model environment variables as in Slice 1 and run:
+## Three refunds: split a burst
 
 ```sh
-pnpm play refund-three
+pnpm --filter governance-playground play refund-three
 ```
 
-The read-only page refreshes every two seconds. When a model proposes a batch, deny decisions appear red, corrections yellow, and successful audits green as the run proceeds. The feed shows each invocation and audit's current state, not a complete history of their state changes.
+If the model proposes three calls together, the terminal shows `exactly_one` denies and a correction, followed by individual calls and refund/audit verification. The feed displays denies in red, corrections in yellow, and successful tool audits in green. The policy requires exactly one tool call per step; model behavior determines whether a burst actually occurs.
 
-Model behavior varies: in Eric's tests, gpt-6-luna did not batch calls, while qwen3.5 on Ollama did. Use a model that batches to see the split. Warm up a local Ollama model before running: a cold start can hit the 120-second limit.
-
-## Slice 3: large refund approval
-
-Build and start the database as above. Set `DATABASE_URL` in both terminals. In terminal A, run `pnpm feed` and open http://localhost:43123. In terminal B, set the model environment variables and run:
+## Large refund: human approval
 
 ```sh
-pnpm play refund-large
+pnpm --filter governance-playground play refund-large
 ```
 
-When the model proposes the $200 refund, the feed's Awaiting approval count rises to 1 and the pending panel shows `issue_refund` and its input. The terminal asks for y/n. Answer y to approve: the refund lands and the feed shows green approved and allow events. Answer n to reject: no refund lands. The feed is read-only; approval happens only in the terminal.
+For the $200 refund, the terminal shows the proposed call and asks for `y` or `n`. Approving reruns the invocation; rejecting cancels it. The feed shows the pending approval and subsequent decisions. The `requireApproval` predicate gates refunds above $50 and every `delete_customer` call.
 
-Refunds strictly greater than $50 require approval, while $50 does not. `delete_customer` always requires approval. Model behavior may vary.
+## Email claim: check the evidence
 
-## Slice 4: claim checks and free input
+```sh
+pnpm --filter governance-playground play email-claim
+```
 
-With the database and `pnpm feed` running, open the feed and run `pnpm play email-claim` in another terminal. If the reply says the email was sent without calling the email tool, the claim check marks it `CLAIM UNVERIFIED`; the feed shows a refund audit but no `send_email_to_customer` audit.
+The terminal prints the assistant's reply, claim checks, and audit verification. If the assistant claims an email was sent without the evidence, the email claim is marked `CLAIM UNVERIFIED`; if the email was recorded, it can be `VERIFIED`. The feed shows actual tool audits, including `issue_refund` and, only if called, `send_email_to_customer`. This is an audit-based claim check, not a separate runtime policy; tool calls still pass through the policies below. The model may actually call the email tool instead of making an unsupported claim.
 
-For free input, run `pnpm play ask "Your request here"`. Different models can behave differently: if the email really was recorded, the check shows `VERIFIED`. The checker uses database audit and sandbox evidence, not guesses about intent. The sandbox records emails; it does not actually deliver them.
+## Policy reference
 
-The seeded `ord_03` total is $50 and belongs to `cus_03`, so the scenario requests a full refund.
+| Policy           | Playground behavior                                                                           |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| exactly-one      | Reject multiple tool calls in one model step and request a single call.                       |
+| correctionBudget | Allow up to 3 corrections.                                                                    |
+| allowlist        | Permit the nine playground tools only.                                                        |
+| requireApproval  | Require approval for `issue_refund` amounts greater than $50 and all `delete_customer` calls. |
+| maxToolCalls     | Limit each invocation to 12 tool calls.                                                       |
+| maxDurationMs    | Limit each invocation to 120 seconds.                                                         |
+
+## Model notes
+
+Burst behavior varies by model: Eric observed that gpt-6-luna did not batch calls, while qwen3.5 on Ollama did. Warm up a local Ollama model first or its cold start may hit the 120-second limit. Set `MODEL_ID` to the exact ID listed by your endpoint's `/v1/models` response.
+
+## Free input
+
+Run `pnpm --filter governance-playground play ask "Your request here"` to submit your own request.
+
+## Limitations
+
+- Governance is invocation-level: approval reruns the entire invocation rather than resuming a step.
+- No real emails are sent and no real cards are charged.
+- The feed is read-only; approvals happen in the terminal.
+- Claim checks look for simple keywords and matching evidence, not meaning or intent. Model output varies.
