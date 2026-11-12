@@ -48,6 +48,8 @@ export interface RuntimePolicies {
   maxToolCallsPerInvocation?: number;
   maxDurationMs?: number;
   toolAllowlist?: string[] | ((scope: string) => string[] | undefined);
-  requireApproval?: string[];
+  requireApproval?:
+    | string[]
+    | ((call: { scope: string; toolName: string; input: unknown }) => boolean);
   maxToolResultBytes?: number;
 }
