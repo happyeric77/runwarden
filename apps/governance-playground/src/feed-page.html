@@ -95,6 +95,13 @@
       #chips .chip { position: relative; }
       #playback-controls { display: flex; align-items: center; gap: 16px; }
       button { background: #203653; border: 1px solid #57a8ff; color: #e8eef9; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+      select, input { background: #141e34; color: #e8eef9; border: 1px solid #2a3a5f; border-radius: 6px; padding: 9px; max-width: 100%; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      #controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+      #controls p { margin: 0; }
+      .run { margin: 0 0 14px; }
+      #approval-controls { border: 1px solid #f5b544; background: #382c24; border-radius: 12px; padding: 16px; }
+      #control-message { color: #f5b544; }
       #playback-label { color: #93a5c4; font-size: 12px; }
       #record { border-top: 1px solid #2a3a5f; margin-top: 24px; padding-top: 18px; }
       #record p { font-family: monospace; font-size: 11px; }
@@ -121,6 +128,7 @@
   </head>
   <body>
     <header><div class="brand">RUNWARDEN <span class="subtitle">GOVERNANCE PLAYGROUND</span></div><span id="stage-status">WAITING FOR CASE</span></header>
+    <section id="controls" class="panel"><label for="model">Actor</label><select id="model" aria-label="Model"><option value="scripted">Scripted actor (deterministic)</option></select><p id="model-status" role="status">Detecting environment models...</p><p id="control-message" role="status"></p></section>
     <main class="stage">
       <aside><section class="panel" id="missions"><h2>Missions</h2>
         <button type="button" class="card" id="burst" data-scenario="refund-three"><h3>Burst refunds</h3><code>pnpm play refund-three</code><span class="mission-status"></span></button>
@@ -131,7 +139,7 @@
         <button type="button" class="card" data-scenario="unclassified"><h3>Unclassified</h3><span class="mission-status"></span></button>
         <button type="button" id="follow">Following latest task</button>
       </section><section class="panel"><h2>The Agent</h2><span class="agent-badge">AI AGENT</span><span class="bad-habits">BAD HABITS: ON</span></section></aside>
-      <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div></section>
+      <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div><section id="approval-controls" hidden><h3>Awaiting approval</h3><p id="approval-input"></p><button type="button" id="approve">Approve</button> <button type="button" id="reject">Reject</button></section></section>
       <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol><section id="record"><h2>Record</h2><div id="record-lines"></div></section></section>
     </main>
     <div id="playback-controls"><button id="replay" type="button" disabled>Replay case</button><span id="playback-label">Waiting for evidence. Playback does not execute tools.</span></div>
@@ -154,6 +162,50 @@
       let allCases = [];
       let selectedMission = null;
       let allApprovals = [];
+      let submitting = false;
+      let awaitingCase;
+      const activeStatuses = ['pending', 'running'];
+      function updateControls() {
+        document.querySelectorAll('.run').forEach((button) => { button.disabled = submitting || allCases.some((item) => activeStatuses.includes(item.status)); });
+        const pending = allApprovals.find((item) => item.invocationId === currentCase?.invocationId);
+        document.querySelector('#approval-controls').hidden = currentCase?.status !== 'awaiting_approval';
+        document.querySelector('#approval-input').textContent = pending ? `${pending.tool} · ${pending.input?.amount == null ? 'Amount unavailable' : '$' + pending.input.amount} · ${JSON.stringify(pending.input)}` : 'Pending tool details unavailable. Waiting for polling.';
+        for (const id of ['approve', 'reject']) document.querySelector('#' + id).disabled = submitting || !pending || allCases.some((item) => activeStatuses.includes(item.status));
+      }
+      async function post(path, body) {
+        const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
+        return result;
+      }
+      async function control(action) {
+        submitting = true; updateControls();
+        try { await action(); document.querySelector('#control-message').textContent = ''; await refresh(); }
+        catch (error) { document.querySelector('#control-message').textContent = error.message; }
+        finally { submitting = false; updateControls(); }
+      }
+      document.querySelectorAll('[data-scenario]').forEach((card) => {
+        if (card.dataset.scenario === 'unclassified') return;
+        let input;
+        if (card.dataset.scenario === 'ask') {
+          input = document.createElement('input'); input.id = 'ask-text'; input.placeholder = 'Describe a custom task'; input.setAttribute('aria-label', 'Custom task'); card.after(input);
+        }
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'run'; button.textContent = 'Run'; button.setAttribute('aria-label', `Run ${card.dataset.scenario}`);
+        (input ?? card).after(button);
+        button.addEventListener('click', () => control(async () => {
+          const result = await post('/api/run', { scenario: card.dataset.scenario, modelId: document.querySelector('#model').value, ...(input ? { text: input.value } : {}) });
+          selectedMission = card.dataset.scenario; awaitingCase = result.invocationId;
+        }));
+      });
+      for (const decision of ['approve', 'reject']) document.querySelector('#' + decision).addEventListener('click', () => control(() => post('/api/approvals', { invocationId: currentCase.invocationId, decision })));
+      async function loadModels() {
+        try {
+          const response = await fetch('/api/models'); const data = await response.json();
+          document.querySelector('#model').replaceChildren(...[data.scripted, ...data.real.map((id) => ({ id, label: id }))].map((item) => { const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; return option; }));
+          if (data.real.includes(data.selected)) document.querySelector('#model').value = data.selected;
+          document.querySelector('#model-status').textContent = data.real.length ? `${data.real.length} environment models detected` : 'No environment models detected · scripted actor available';
+        } catch { document.querySelector('#model-status').textContent = 'Model detection unavailable · scripted actor available'; }
+      }
       document.querySelectorAll('[data-scenario]').forEach((button) => button.addEventListener('click', () => {
         selectedMission = button.dataset.scenario;
         selectCase();
@@ -174,7 +226,7 @@
         const changed = current?.invocationId !== currentCase?.invocationId;
         currentCase = current;
         document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'NO EXECUTION YET';
-        document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'No execution yet. Run the CLI command shown in the selected Mission.';
+        document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'No execution yet. Click Run on a Mission.';
         document.querySelector('#replay').disabled = !current;
         const signature = JSON.stringify(current);
         if (signature !== lastSignature) {
@@ -200,6 +252,7 @@
           row.textContent = `${approval.invocationId}: ${approval.tool} ${JSON.stringify(approval.input)}`;
           return row;
         }));
+        updateControls();
       }
       const pause = (ms) => new Promise((resolve) => setTimeout(resolve, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
       document.querySelector('#replay').addEventListener('click', () => currentCase && playCase(currentCase));
@@ -307,6 +360,7 @@
           if (!casesResponse.ok) throw new Error(`HTTP ${casesResponse.status}`);
           const { cases } = await casesResponse.json();
           allCases = cases;
+          if (awaitingCase && cases.some((item) => item.invocationId === awaitingCase)) awaitingCase = undefined;
           allApprovals = pendingApprovals;
           selectCase();
           document.querySelector('#stats').textContent =
@@ -318,6 +372,7 @@
         }
       }
       refresh();
+      loadModels();
       setInterval(refresh, 2000);
     </script>
   </body>
