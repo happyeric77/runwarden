@@ -9,7 +9,7 @@ CLI runs record their scenario in invocation metadata. Missions follow the newes
 Run `pnpm play refund-wrong-account` to request a $50 refund for `ord_03` to `cus_05`.
 The tool schema rejects a mismatched destination, and synchronous `issue_refund.validateInput` supplies the correction using the same order constants as seed, not a database lookup.
 It denies the destination before execution and instructs the model to use the owner, `cus_03`.
-The corrected $50 refund does not require approval. Models may refuse or fail to correct; the deterministic test uses a fake model.
+The corrected $50 refund does not require approval. Models may refuse or fail to correct; the Scripted actor uses a fake model.
 The stage highlights Wrong-account refund, stamps DENIED, then shows the actual corrected execution and REFUNDED order.
 The sandbox records `destination_customer_id` in refunds; omitted destinations default to the order owner.
 This seed-based rule is for the fixed sandbox, not authorization against mutable production orders.

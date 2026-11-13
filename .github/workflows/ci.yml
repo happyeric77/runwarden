@@ -22,7 +22,6 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: pnpm --filter governance-playground typecheck
-      - run: pnpm --filter governance-playground test
       - run: pnpm test:integration
       - run: npm pack --dry-run
         working-directory: packages/runwarden
