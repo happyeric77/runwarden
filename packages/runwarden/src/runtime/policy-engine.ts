@@ -215,6 +215,21 @@ export class PolicyEngine {
     if (this.terminal) return;
 
     if (this.pendingCorrection) {
+      if (toolCalls.length === 0) {
+        if (this.pendingCorrection.correctionsUsed >= this.correctionBudget) {
+          this.exhaustCorrection(toolCalls);
+        } else {
+          this.pendingCorrection.correctionsUsed += 1;
+          this.record({
+            rule:
+              this.pendingCorrection.kind === 'multi-call'
+                ? 'exactly_one'
+                : 'input_validation',
+            decision: 'correction_issued',
+          });
+        }
+        return;
+      }
       const only = toolCalls.length === 1 ? toolCalls[0] : undefined;
       if (only && !only.invalid) {
         this.pendingCorrection = undefined;
