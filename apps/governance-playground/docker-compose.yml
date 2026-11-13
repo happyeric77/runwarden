@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: governance_playground
+    ports:
+      - '54331:5432'
+    volumes:
+      - gp-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  feed:
+    build:
+      context: ../..
+      dockerfile: apps/governance-playground/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:password@postgres:5432/governance_playground
+      FEED_HOST: 0.0.0.0
+      FEED_PORT: 43123
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_ID: ${MODEL_ID:-}
+    ports:
+      - '127.0.0.1:43123:43123'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  gp-postgres:
