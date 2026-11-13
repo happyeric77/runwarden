@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createDb, initDb } from 'runwarden';
 
 import { buildCases, type CaseEvent } from './cases.js';
+import { ControlError, models, stageControls } from './controls.js';
 
 export async function startFeedServer(port: number) {
   const databaseUrl = process.env.DATABASE_URL;
@@ -17,9 +18,73 @@ export async function startFeedServer(port: number) {
     await db.close();
     throw error;
   }
+  const controls = stageControls(databaseUrl, db);
   const server = createServer(async (req, res) => {
-    if (req.method !== 'GET') {
-      res.writeHead(405, { Allow: 'GET' }).end();
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'GET, POST' }).end();
+      return;
+    }
+    if (req.method === 'POST') {
+      if (req.url !== '/api/run' && req.url !== '/api/approvals') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (
+        req.headers.origin &&
+        req.headers.origin !== `http://${req.headers.host}`
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      try {
+        let raw = '';
+        for await (const chunk of req) {
+          raw += chunk;
+          if (Buffer.byteLength(raw) > 16384)
+            throw new ControlError(413, 'Request too large');
+        }
+        let body;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          throw new ControlError(400, 'Invalid JSON');
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body))
+          throw new ControlError(400, 'JSON object required');
+        const result =
+          req.url === '/api/run'
+            ? await controls.run(body)
+            : await controls.approval(body);
+        res
+          .writeHead(req.url === '/api/run' ? 202 : 200, {
+            'Content-Type': 'application/json',
+          })
+          .end(JSON.stringify(result));
+      } catch (error) {
+        if (!(error instanceof ControlError))
+          console.error('Stage control failed:', error);
+        res
+          .writeHead(error instanceof ControlError ? error.status : 500, {
+            'Content-Type': 'application/json',
+          })
+          .end(
+            JSON.stringify({
+              error:
+                error instanceof ControlError
+                  ? error.message
+                  : 'Stage control failed',
+            }),
+          );
+      }
+      return;
+    }
+    if (req.url === '/api/models') {
+      res
+        .writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        })
+        .end(JSON.stringify(await models()));
       return;
     }
     if (req.url === '/') {
@@ -129,6 +194,7 @@ export async function startFeedServer(port: number) {
           server.close((error) => (error ? reject(error) : resolve())),
         );
       } finally {
+        await controls.close();
         await db.close();
       }
     },

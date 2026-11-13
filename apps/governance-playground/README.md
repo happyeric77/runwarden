@@ -10,7 +10,7 @@ Run `pnpm play refund-wrong-account` to request a $50 refund for `ord_03` to `cu
 The tool schema rejects a mismatched destination, and synchronous `issue_refund.validateInput` supplies the correction using the same order constants as seed, not a database lookup.
 It denies the destination before execution and instructs the model to use the owner, `cus_03`.
 The corrected $50 refund does not require approval. Models may refuse or fail to correct; the deterministic test uses a fake model.
-The read-only stage highlights Wrong-account refund, stamps DENIED, then shows the actual corrected execution and REFUNDED order.
+The stage highlights Wrong-account refund, stamps DENIED, then shows the actual corrected execution and REFUNDED order.
 The sandbox records `destination_customer_id` in refunds; omitted destinations default to the order owner.
 This seed-based rule is for the fixed sandbox, not authorization against mutable production orders.
 
@@ -22,48 +22,35 @@ An intentionally unruly agent meets Runwarden's real-time governance in a sandbo
 
 ## Quickstart
 
-You need Node.js 22 or newer, pnpm, Docker with Compose, and an OpenAI-compatible model endpoint and API key. From the repository root:
+Docker Compose is the supported demo setup. No host Node.js installation or model key is needed for the deterministic Scripted actor. This is a locally bound demo console, not a hosted service; it has no accounts or permission system. Do not expose its port publicly.
 
-1. Install host dependencies, build the core package for the host CLI, and start Postgres and the feed:
-
-   ```sh
-   pnpm install
-   pnpm build
-   docker compose -f apps/governance-playground/docker-compose.yml up -d --build
-   ```
-
-2. In the terminal where you will run the scenarios, export all five variables. Replace the model values with your endpoint, key, and model ID:
+1. From `apps/governance-playground`, create the Compose environment file:
 
    ```sh
-   export DATABASE_URL=postgres://postgres:password@localhost:54331/governance_playground
-   export MODEL_BASE_URL=https://api.openai.com/v1
-   export MODEL_API_KEY=your-key
-   export MODEL_ID=your-model-id
-   export FEED_PORT=43123
+   cp .env.example .env
    ```
 
-3. Open the feed in a browser:
+2. For a real model, fill `.env` with your OpenAI-compatible base URL, key, and preselected model ID. Leave them empty to use only Scripted actor. A model server running on the host must use `host.docker.internal` from containers:
 
    ```sh
-   open http://localhost:43123
+   MODEL_BASE_URL=http://host.docker.internal:11434/v1
+   MODEL_API_KEY=
+   MODEL_ID=qwen3.5
    ```
 
-   On Linux use `xdg-open http://localhost:43123` instead. The feed runs in Compose; scenarios run in this host terminal.
-
-4. Run the three-refund scenario:
+3. Build and start the stack:
 
    ```sh
-   pnpm --filter governance-playground play refund-three
+   docker compose up -d --build --wait
    ```
 
-5. Run the approval and claim-check scenarios. Answer `y` or `n` when prompted for approval:
+4. Open <http://localhost:43123>, select an actor, and click a Mission's **Run**. Use **Approve** or **Reject** beside the Gate when a case parks. The model list reports discovery availability; if the endpoint is unavailable, only Scripted actor is offered. Run buttons are disabled while an invocation is pending or running, and become available at completion or approval parking.
 
-   ```sh
-   pnpm --filter governance-playground play refund-large
-   pnpm --filter governance-playground play email-claim
-   ```
+Stop with `docker compose down`. Apply `.env` changes by running `docker compose up -d --build --wait` again. The feed container receives `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_ID`; credentials are not returned to the browser. Shop data resets before a run unless an approval is pending, in which case it is preserved. Do not use this database for real data. Resolve parked cases before repeating a refund of the same order.
 
-Stop the stack with `docker compose -f apps/governance-playground/docker-compose.yml down`. Each scenario resets the sandbox shop data before running; do not use this database for real data.
+The host `pnpm --filter governance-playground play <scenario>` CLI remains an alternative entry point after installing dependencies, building core and configuring the host environment.
+
+Scripted actor is a fake model through the real runtime, MCP and database: Burst batches then corrects, Big refund parks, Wrong-account corrects the destination, and Email claim deliberately omits the email tool. Scripted **ask** explains that custom requests require an environment model. It does not contact a provider.
 
 ## Three refunds: split a burst
 
@@ -79,7 +66,7 @@ If the model proposes three calls together, the terminal shows `exactly_one` den
 pnpm --filter governance-playground play refund-large
 ```
 
-For the $200 refund, the terminal shows the proposed call and asks for `y` or `n`. Approving reruns the invocation; rejecting cancels it. The feed shows the pending approval and subsequent decisions. The `requireApproval` predicate gates refunds above $50 and every `delete_customer` call.
+For the $200 refund, the stage shows the proposed tool and amount and offers Approve or Reject. Approving reruns the invocation; rejecting cancels it. The `requireApproval` predicate gates refunds above $50 and every `delete_customer` call.
 
 ## Email claim: check the evidence
 
@@ -106,11 +93,11 @@ Burst behavior varies by model: Eric observed that gpt-6-luna did not batch call
 
 ## Free input
 
-Run `pnpm --filter governance-playground play ask "Your request here"` to submit your own request.
+Enter a request under Free input and click Run with an environment model selected.
 
 ## Limitations
 
 - Governance is invocation-level: approval reruns the entire invocation rather than resuming a step.
 - No real emails are sent and no real cards are charged.
-- The feed is read-only; approvals happen in the terminal.
+- Stage controls are local-only and allow one active run at a time. They are not a multi-user service. Do not run a separate CLI worker against the same database while using the stage.
 - Claim checks look for simple keywords and matching evidence, not meaning or intent. Model output varies.

@@ -192,7 +192,8 @@ it('serves a read-only, ordered feed and global counts without a model', async (
       expect(html).toContain(marker);
     expect(
       (await fetch(`${feed.url}/api/events`, { method: 'POST' })).status,
-    ).toBe(405);
+    ).toBe(404);
+    expect((await fetch(feed.url, { method: 'PUT' })).status).toBe(405);
     expect((await fetch(`${feed.url}/missing`)).status).toBe(404);
   } finally {
     await feed?.close();
