@@ -144,22 +144,47 @@
       let currentCase;
       let lastSignature = '';
       let playbackGeneration = 0;
+      let playback;
       const pause = (ms) => new Promise((resolve) => setTimeout(resolve, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
       document.querySelector('#replay').addEventListener('click', () => currentCase && playCase(currentCase));
-      async function playCase(current) {
-        const generation = ++playbackGeneration;
+      async function playCase(current, reset = true) {
+        if (reset) {
+          playbackGeneration++;
+          playback = { orders: [], judge: [], chips: [], seen: new Set(), running: false };
+          document.querySelector('#record-lines').replaceChildren();
+          document.querySelector('#correction').hidden = true;
+          document.querySelector('.gate').classList.remove('open');
+        }
+        if (playback.running) return;
+        const state = playback;
+        state.running = true;
+        const generation = playbackGeneration;
         const live = () => generation === playbackGeneration;
-        const orders = current.orders.map((order) => ({ ...order, status: 'PLACED' }));
-        const judge = [];
-        const chips = [];
+        const { orders, judge, chips } = state;
         const record = document.querySelector('#record-lines');
-        record.replaceChildren();
-        document.querySelector('#correction').hidden = true;
-        document.querySelector('.gate').classList.remove('open');
         document.querySelector('#playback-label').textContent = 'Playing recorded evidence · not live tool execution';
-        renderStage({ ...current, orders, judge, chips });
-        await pause(800);
-        for (const text of current.judge) {
+        if (reset) {
+          orders.push(...current.orders.map((order) => ({ ...order, status: 'PLACED' })));
+          renderStage({ ...current, orders, judge, chips });
+        }
+        try {
+        if (reset) await pause(800);
+        while (live()) {
+          current = currentCase;
+          for (const order of current.orders) {
+            if (!orders.some((item) => item.orderId === order.orderId)) orders.push({ ...order, status: 'PLACED' });
+          }
+          const occurrences = new Map();
+          const entries = current.judge.map((text) => {
+            const base = text.replace(/^Agent tried \d+ tool calls/, 'Agent tried tool calls');
+            const count = (occurrences.get(base) ?? 0) + 1;
+            occurrences.set(base, count);
+            return { text, key: `${base}:${count}` };
+          });
+          const next = entries.find((entry) => !state.seen.has(entry.key));
+          if (!next) break;
+          const { text, key } = next;
+          state.seen.add(key);
           if (!live()) return;
           if (/\bdenied\b/i.test(text)) {
             chips.push(...current.chips.filter((chip) => /\bdeny\b/i.test(chip)));
@@ -190,7 +215,8 @@
         }
         if (!live()) return;
         renderStage(current);
-        document.querySelector('#playback-label').textContent = 'Recorded evidence complete · Replay case to watch again';
+        document.querySelector('#playback-label').textContent = ['succeeded', 'failed', 'cancelled'].includes(current.status) ? 'Recorded evidence complete · Replay case to watch again' : 'Waiting for more evidence · playback will continue';
+        } finally { state.running = false; }
       }
       function renderStage(current) {
         document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
@@ -224,6 +250,7 @@
           const { cases } = await casesResponse.json();
           const current = cases[0];
           document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'WAITING FOR CASE';
+          const changedCase = current?.invocationId !== currentCase?.invocationId;
           currentCase = current;
           document.querySelector('#replay').disabled = !current;
           document.querySelector('#burst').classList.toggle('active', !!current?.judge.some((line) => line.startsWith('Agent tried ')));
@@ -231,7 +258,7 @@
           const signature = JSON.stringify(current);
           if (signature !== lastSignature) {
             lastSignature = signature;
-            if (current) playCase(current).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
+            if (current) playCase(current, changedCase || !playback).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
             else { playbackGeneration++; renderStage(null); }
           }
           document.querySelector('#stats').textContent =
