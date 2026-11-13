@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Governance live feed</title>
+    <title>Governance Demo Stage</title>
     <style>
       body {
-        background: #101720;
-        color: #e7edf5;
+        background: #0d1321;
+        color: #e8eef9;
         font:
           16px system-ui,
           sans-serif;
         margin: 0 auto;
-        max-width: 1000px;
+        max-width: 1600px;
         padding: 24px;
       }
       h1 {
@@ -57,10 +57,80 @@
       .green {
         background: #17663a;
       }
+      * { box-sizing: border-box; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 6px 0 26px; }
+      .brand { font-size: 28px; font-weight: 800; letter-spacing: 1px; }
+      .subtitle { font-size: 14px; color: #93a5c4; font-weight: 400; margin-left: 14px; }
+      #stage-status { color: #57a8ff; border: 1px solid #57a8ff; border-radius: 30px; padding: 7px 14px; font-size: 12px; white-space: nowrap; }
+      .stage { display: grid; grid-template-columns: 230px minmax(0, 1fr) 350px; gap: 20px; }
+      .panel, .card { background: #141e34; border: 1px solid #2a3a5f; border-radius: 12px; padding: 20px; }
+      .panel { margin-bottom: 16px; }
+      h2 { text-transform: uppercase; font-size: 18px; letter-spacing: 1.5px; color: #93a5c4; margin: 0 0 20px; }
+      h3 { font-size: 14px; margin: 0 0 12px; }
+      p { color: #93a5c4; font-size: 13px; line-height: 1.6; }
+      #missions .card { padding: 16px; margin-bottom: 12px; background: #19263f; }
+      #missions code { font-size: 11px; color: #93a5c4; }
+      .active { border-color: #57a8ff; box-shadow: 0 0 0 1px #57a8ff; }
+      .agent-badge { display: inline-block; border: 1px solid #57a8ff; color: #e8eef9; background: #203653; border-radius: 8px; padding: 12px 18px; font-weight: 700; font-size: 13px; }
+      .bad-habits { display: block; border: 1px solid #f0564f; color: #f0564f; background: #361e27; border-radius: 24px; padding: 9px; text-align: center; font-size: 11px; margin-top: 16px; }
+      #shop-floor, #judge { min-height: 590px; }
+      #case-status { margin-bottom: 20px; }
+      #orders { display: flex; gap: 12px; }
+      #orders .card { flex: 1; min-width: 0; padding: 16px 12px; border: 2px solid #75859e; transition: border-color .3s, background-color .3s; }
+      #orders .refunded { border-color: #35c26e; background: #152c2c; }
+      .order-id { display: block; font-size: 16px; font-weight: 700; margin-bottom: 15px; }
+      .amount { display: block; font-size: 19px; font-variant-numeric: tabular-nums; }
+      .order-state { display: block; font-size: 11px; margin-top: 10px; color: #93a5c4; font-weight: 700; }
+      .refunded .order-state { color: #35c26e; }
+      .gate-area { position: relative; display: flex; align-items: center; justify-content: center; gap: 28px; min-height: 350px; margin-top: 24px; }
+      .gate { position: relative; display: flex; align-items: center; justify-content: center; width: 56px; min-width: 56px; height: 290px; border: 2px solid #f5b544; border-radius: 12px; background: #382c24; color: #f5b544; }
+      .gate strong { writing-mode: vertical-rl; text-orientation: upright; font-size: 14px; letter-spacing: 5px; }
+      #denied-stamp { position: absolute; top: 85px; left: -43px; transform: rotate(-13deg); border: 3px solid #f0564f; color: #f0564f; background: #301b28; border-radius: 7px; padding: 8px 12px; font-size: 24px; font-weight: 900; letter-spacing: 2px; z-index: 1; }
+      #chips { max-width: 260px; }
+      .gate-area { overflow: hidden; }
+      .gate.open { border-color: #35c26e; background: #16372e; }
+      #chips { width: 260px; min-height: 220px; }
+      #chips .chip { position: relative; }
+      #playback-controls { display: flex; align-items: center; gap: 16px; }
+      button { background: #203653; border: 1px solid #57a8ff; color: #e8eef9; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+      #playback-label { color: #93a5c4; font-size: 12px; }
+      #record { border-top: 1px solid #2a3a5f; margin-top: 24px; padding-top: 18px; }
+      #record p { font-family: monospace; font-size: 11px; }
+      #correction { color: #f5b544; border-left: 3px solid #f5b544; padding-left: 12px; }
+      .chip { display: block; background: #1b2c49; border: 1px solid #57a8ff; border-radius: 8px; padding: 9px 12px; margin: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
+      .chip.deny { border-color: #f0564f; color: #f0564f; }
+      .chip.succeeded { border-color: #35c26e; color: #35c26e; }
+      .chip.parked { border-color: #f5b544; color: #f5b544; }
+      #verdicts { padding: 0; list-style: none; }
+      #verdicts li { position: relative; display: block; border: 0; padding: 0 0 0 22px; margin: 22px 0; font-size: 14px; line-height: 1.6; }
+      #verdicts li::before { content: ''; position: absolute; left: 0; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: #57a8ff; }
+      #verdicts .denied::before { background: #f0564f; }
+      #verdicts .correction::before { background: #f5b544; }
+      #verdicts .executed::before, #verdicts .closed::before { background: #35c26e; }
+      #verdicts .closed { background: #16372e; border: 1px solid #276a49; color: #80e2a7; border-radius: 8px; padding: 14px 14px 14px 30px; font-weight: 600; }
+      #verdicts .closed::before { left: 12px; top: 21px; }
+      #evidence { font-size: 11px; color: #93a5c4; border-top: 1px solid #2a3a5f; padding-top: 14px; }
+      #evidence summary { cursor: pointer; }
+      #evidence li, #evidence p, #evidence time { font-size: 11px; color: #93a5c4; }
+      code { overflow-wrap: anywhere; }
+      @media (max-width: 1100px) { .stage { grid-template-columns: 200px minmax(0, 1fr); } #judge { grid-column: 1 / -1; min-height: auto; } }
+      @media (max-width: 700px) { body { padding: 16px; } .stage { grid-template-columns: 1fr; } .subtitle { display: block; margin: 6px 0 0; } #orders { flex-wrap: wrap; } #orders .card { min-width: 120px; } }
     </style>
   </head>
   <body>
-    <h1>Governance live feed</h1>
+    <header><div class="brand">RUNWARDEN <span class="subtitle">GOVERNANCE PLAYGROUND</span></div><span id="stage-status">WAITING FOR CASE</span></header>
+    <main class="stage">
+      <aside><section class="panel" id="missions"><h2>Missions</h2>
+        <article class="card" id="burst"><h3>Burst refunds</h3><p>Three refunds meet the policy gate.</p><code>pnpm play refund-three</code></article>
+        <article class="card"><h3>Big refund</h3><p>A large refund awaits approval.</p><code>pnpm play refund-large</code></article>
+        <article class="card"><h3>Email claim</h3><p>Check what actually happened.</p><code>pnpm play email-claim</code></article>
+      </section><section class="panel"><h2>The Agent</h2><span class="agent-badge">AI AGENT</span><span class="bad-habits">BAD HABITS: ON</span></section></aside>
+      <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div></section>
+      <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol><section id="record"><h2>Record</h2><div id="record-lines"></div></section></section>
+    </main>
+    <div id="playback-controls"><button id="replay" type="button" disabled>Replay case</button><span id="playback-label">Waiting for evidence. Playback does not execute tools.</span></div>
+    <p id="correction" hidden></p>
+    <details id="evidence"><summary>Evidence</summary>
     <p id="stats">Loading statistics...</p>
     <section id="pending" hidden>
       <h2>Pending approvals</h2>
@@ -68,13 +138,129 @@
     </section>
     <p id="message" role="status"></p>
     <ul id="events" aria-label="Governance events"></ul>
+    </details>
     <script>
       const list = document.querySelector('#events');
+      let currentCase;
+      let lastSignature = '';
+      let playbackGeneration = 0;
+      let playback;
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
+      document.querySelector('#replay').addEventListener('click', () => currentCase && playCase(currentCase));
+      async function playCase(current, reset = true) {
+        if (reset) {
+          playbackGeneration++;
+          playback = { orders: [], judge: [], chips: [], seen: new Set(), running: false };
+          document.querySelector('#record-lines').replaceChildren();
+          document.querySelector('#correction').hidden = true;
+          document.querySelector('.gate').classList.remove('open');
+        }
+        if (playback.running) return;
+        const state = playback;
+        state.running = true;
+        const generation = playbackGeneration;
+        const live = () => generation === playbackGeneration;
+        const { orders, judge, chips } = state;
+        const record = document.querySelector('#record-lines');
+        document.querySelector('#playback-label').textContent = 'Playing recorded evidence · not live tool execution';
+        if (reset) {
+          orders.push(...current.orders.map((order) => ({ ...order, status: 'PLACED' })));
+          renderStage({ ...current, orders, judge, chips });
+        }
+        try {
+        if (reset) await pause(800);
+        while (live()) {
+          current = currentCase;
+          for (const order of current.orders) {
+            if (!orders.some((item) => item.orderId === order.orderId)) orders.push({ ...order, status: 'PLACED' });
+          }
+          const occurrences = new Map();
+          const entries = current.judge.map((text) => {
+            const base = text.replace(/^Agent tried \d+ tool calls/, 'Agent tried tool calls');
+            const count = (occurrences.get(base) ?? 0) + 1;
+            occurrences.set(base, count);
+            return { text, key: `${base}:${count}` };
+          });
+          const next = entries.find((entry) => !state.seen.has(entry.key));
+          if (!next) break;
+          const { text, key } = next;
+          state.seen.add(key);
+          if (!live()) return;
+          if (/\bdenied\b/i.test(text)) {
+            chips.push(...current.chips.filter((chip) => /\bdeny\b/i.test(chip)));
+            renderStage({ ...current, orders, judge, chips });
+            const tokens = [...document.querySelectorAll('#chips .chip')];
+            await Promise.all(tokens.map((token) => token.animate([{ transform: 'translateX(-180px)', opacity: 0 }, { transform: 'translateX(0)', opacity: 1 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1000, fill: 'both' }).finished));
+            if (!live()) return;
+          }
+          if (/^Executed:/.test(text)) {
+            const order = orders.find((order) => text === `Executed: issue_refund ${order.orderId}.`);
+            const token = document.createElement('span');
+            token.className = 'chip succeeded';
+            token.textContent = order ? `issue_refund ${order.orderId}` : text;
+            document.querySelector('#chips').replaceChildren(token);
+            document.querySelector('.gate').classList.add('open');
+            await token.animate([{ transform: 'translateX(-100px)', opacity: 1 }, { transform: 'translateX(240px)', opacity: 0 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1200, fill: 'both' }).finished;
+            if (!live()) return;
+            if (order) order.status = current.orders.find((item) => item.orderId === order.orderId).status;
+            const row = document.createElement('p'); row.textContent = text; record.append(row);
+          }
+          if (/correction/i.test(text)) {
+            document.querySelector('#correction').textContent = text;
+            document.querySelector('#correction').hidden = false;
+          }
+          judge.push(text);
+          renderStage({ ...current, orders, judge, chips });
+          await pause(/^Case closed:/.test(text) ? 0 : 1000);
+        }
+        if (!live()) return;
+        renderStage(current);
+        document.querySelector('#playback-label').textContent = ['succeeded', 'failed', 'cancelled'].includes(current.status) ? 'Recorded evidence complete · Replay case to watch again' : 'Waiting for more evidence · playback will continue';
+        } finally { state.running = false; }
+      }
+      function renderStage(current) {
+        document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
+        document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
+          const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;
+          for (const [className, text] of [['order-id', order.orderId], ['amount', order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)], ['order-state', order.status]]) {
+            const label = document.createElement('span'); label.className = className; label.textContent = text; card.append(label);
+          }
+          return card;
+        }));
+        document.querySelector('#chips').replaceChildren(...(current?.chips ?? []).map((text) => {
+          const chip = document.createElement('span'); chip.className = 'chip';
+          if (/\bdeny\b/i.test(text)) chip.classList.add('deny');
+          else if (/\bsucceeded\b/i.test(text)) chip.classList.add('succeeded');
+          else if (/correction|parked|approval_requested/i.test(text)) chip.classList.add('parked');
+          chip.textContent = text; return chip;
+        }));
+        document.querySelector('#verdicts').replaceChildren(...(current?.judge ?? []).map((text) => {
+          const item = document.createElement('li');
+          item.className = /^Case closed:/.test(text) ? 'closed' : /\bdenied\b|^Case failed:|CLAIM UNVERIFIED/i.test(text) ? 'denied' : /correction|parked/i.test(text) ? 'correction' : /^Executed:/.test(text) ? 'executed' : '';
+          item.textContent = text; return item;
+        }));
+      }
       async function refresh() {
         try {
           const response = await fetch('/api/events', { cache: 'no-store' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const { events, stats, pendingApprovals } = await response.json();
+          const casesResponse = await fetch('/api/cases', { cache: 'no-store' });
+          if (!casesResponse.ok) throw new Error(`HTTP ${casesResponse.status}`);
+          const { cases } = await casesResponse.json();
+          const current = cases[0];
+          document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'WAITING FOR CASE';
+          const changedCase = current?.invocationId !== currentCase?.invocationId;
+          currentCase = current;
+          document.querySelector('#replay').disabled = !current;
+          document.querySelector('#burst').classList.toggle('active', !!current?.judge.some((line) => line.startsWith('Agent tried ')));
+          document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'Waiting for a case.';
+          const signature = JSON.stringify(current);
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            if (current) playCase(current, changedCase || !playback).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
+            else { playbackGeneration++; renderStage(null); }
+          }
           document.querySelector('#stats').textContent =
             `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
           document.querySelector('#pending').hidden =

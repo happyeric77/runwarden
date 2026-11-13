@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { runWorker } from 'runwarden';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 
-import { checkClaims } from './claim-check.js';
+import { checkClaims, checkRefundThree } from './claim-check.js';
 import { startPlaygroundMcpServer } from './mcp-server.js';
 import { createPlaygroundRuntime } from './runtime.js';
 import { seed } from './seed.js';
@@ -134,6 +134,10 @@ it.each([false, true])(
         ]);
       }
       expect(await checkClaims(db, result.invocationId, 'Done.')).toEqual([]);
+      expect(await checkRefundThree(db, result.invocationId)).toMatchObject({
+        verified: false,
+        evidence: expect.stringContaining('ord_01 $25.00'),
+      });
     } finally {
       await worker.stop();
       await db.close();

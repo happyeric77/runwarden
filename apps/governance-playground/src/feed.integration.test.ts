@@ -6,7 +6,67 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { createDb, initDb } from 'runwarden';
 import { expect, it } from 'vitest';
 
+import { buildCases, type CaseEvent } from './cases.js';
 import { startFeedServer } from './feed.js';
+
+it('groups a denied burst and three successful refunds into a case', () => {
+  const base: CaseEvent = {
+    at: new Date(),
+    kind: 'decision',
+    invocationId: 'case',
+    tool: 'issue_refund',
+    rule: 'exactly_one',
+    decision: 'deny',
+    status: null,
+    snapshot: null,
+  };
+  const events: CaseEvent[] = [
+    {
+      ...base,
+      kind: 'invocation',
+      status: 'succeeded',
+      tool: null,
+      rule: null,
+      decision: null,
+    },
+    base,
+    base,
+    base,
+    { ...base, tool: null, decision: 'correction_issued' },
+    ...['ord_01', 'ord_02', 'ord_06'].map((orderId) => ({
+      ...base,
+      kind: 'audit',
+      rule: null,
+      decision: null,
+      status: 'succeeded',
+      snapshot: { orderId, amount: 25 },
+    })),
+  ];
+  const [result] = buildCases(events);
+  expect(result!.orders).toHaveLength(3);
+  expect(result!.orders.every((order) => order.status === 'REFUNDED')).toBe(
+    true,
+  );
+  expect(result!.judge).toEqual([
+    'Agent tried 3 tool calls in one step. Denied.',
+    'Correction issued. Retry one by one.',
+    'Executed: issue_refund ord_01.',
+    'Executed: issue_refund ord_02.',
+    'Executed: issue_refund ord_06.',
+    'Case closed: 3 refunds, 3 audit rows.',
+  ]);
+  const noExecutions = events.filter((event) => event.kind !== 'audit');
+  expect(buildCases(noExecutions)[0]!.judge.at(-1)).toBe(
+    'CLAIM UNVERIFIED: model replied, but no tool execution succeeded.',
+  );
+  expect(
+    buildCases(
+      noExecutions.map((event) =>
+        event.kind === 'invocation' ? { ...event, status: 'failed' } : event,
+      ),
+    )[0]!.judge.at(-1),
+  ).toBe('Case failed: invocation failed. Check Evidence.');
+});
 
 it('serves a read-only, ordered feed and global counts without a model', async () => {
   const port = 32_000 + Math.floor(Math.random() * 3_000);
@@ -101,9 +161,31 @@ it('serves a read-only, ordered feed and global counts without a model', async (
       status: 'awaiting_approval',
       summary: expect.stringContaining('feed-test'),
     });
+    const casesResponse = await fetch(`${feed.url}/api/cases`);
+    expect(casesResponse.status).toBe(200);
+    const cases = (await casesResponse.json()) as {
+      cases: Array<{ invocationId: string; judge: string[] }>;
+    };
+    expect(cases.cases).toHaveLength(1);
+    expect(cases.cases[0]).toMatchObject({
+      invocationId: id,
+      status: 'awaiting_approval',
+    });
+    expect(cases.cases[0]!.judge).toContain(
+      'Correction issued. Retry one by one.',
+    );
     const page = await fetch(feed.url);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain('Governance live feed');
+    const html = await page.text();
+    for (const marker of [
+      'Governance Demo Stage',
+      'Missions',
+      'Shop Floor',
+      'Policy Gate',
+      'Judge',
+      'Evidence',
+    ])
+      expect(html).toContain(marker);
     expect(
       (await fetch(`${feed.url}/api/events`, { method: 'POST' })).status,
     ).toBe(405);
