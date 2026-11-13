@@ -4,6 +4,8 @@
 
 CLI runs record their scenario in invocation metadata. Missions follow the newest task by default, before any Judge verdict exists. Click a Mission to pin its latest case; Shop Floor, Judge, Record and Evidence switch together. Click **Follow latest task** to resume following. Empty Missions show no execution, and older runs without scenario metadata appear under **Unclassified**. Status badges report database task state; evidence playback is separate and does not execute tools. Rerun a scenario to label it; existing records are not guessed or rewritten.
 
+<img width="1600" height="812" alt="runwarden-demo-full" src="https://github.com/user-attachments/assets/c843f8ad-dc39-4819-ad67-ab7b9285f964" />
+
 ## Wrong-account refund
 
 Run `pnpm play refund-wrong-account` to request a $50 refund for `ord_03` to `cus_05`.
