@@ -34,6 +34,10 @@ DBOS gives you durable execution for workflows and functions. Runwarden's
 headline is governing what an agent may do (enforced tool-call policy and
 per-call audit), with durable execution as the substrate underneath.
 
+## Demo
+
+Watch an AI agent get governed in the [governance playground](apps/governance-playground/README.md): a deliberately unruly agent runs a fictional shop while Runwarden's policies stop it live. Burst refunds are split into single calls, a refund over $50 waits for human approval, and a refund addressed to the wrong account is denied before it runs. One Docker Compose command starts it, and no model key is needed.
+
 ## Features
 
 - **Enforced tool-call policy**: exactly one tool call per model step, a
@@ -195,10 +199,6 @@ a tool behind human approval, add
 `policies: { requireApproval: ['your__tool'] }` to `defineRuntime`; the
 [full quickstart](packages/runwarden/examples/quickstart/README.md) walks through that flow
 end to end.
-
-## Governance playground
-
-Explore Runwarden's official governance demo with a sandbox shop, live feed, and interactive approval in the [governance playground](apps/governance-playground/README.md).
 
 ## The full quickstart (from the repo)
 
