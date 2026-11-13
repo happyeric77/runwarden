@@ -41,6 +41,7 @@ it('continues updated evidence without replaying completed calls', async () => {
   const source = script.slice(0, script.indexOf('      refresh();'));
   const run = (code: string) => runInNewContext(source + code, context);
   await run(`
+    const originalRenderStage = renderStage;
     renderStage = () => {};
     currentCase = { invocationId: '1', status: 'running', orders: [{ orderId: 'ord_01', status: 'REFUNDED' }], chips: [], judge: ['Executed: issue_refund ord_01.'] };
     (async () => {
@@ -53,6 +54,16 @@ it('continues updated evidence without replaying completed calls', async () => {
     })();
   `);
   expect(nodes.get('#record-lines').children).toHaveLength(3);
+  runInNewContext(
+    `originalRenderStage({ orders: [], chips: [], judge: ['Wrong account. Denied before it ran.'] });`,
+    context,
+  );
+  expect(nodes.get('#denied-stamp').hidden).toBe(false);
+  runInNewContext(
+    `originalRenderStage({ orders: [], chips: [], judge: ['Wrong account. Denied before it ran.', 'Executed: issue_refund ord_03.'] });`,
+    context,
+  );
+  expect(nodes.get('#denied-stamp').hidden).toBe(true);
   await runInNewContext(
     `
     playCase = () => Promise.resolve();

@@ -255,6 +255,7 @@
             token.className = 'chip succeeded';
             token.textContent = order ? `issue_refund ${order.orderId}` : text;
             document.querySelector('#chips').replaceChildren(token);
+            document.querySelector('#denied-stamp').hidden = true;
             document.querySelector('.gate').classList.add('open');
             await token.animate([{ transform: 'translateX(-100px)', opacity: 1 }, { transform: 'translateX(240px)', opacity: 0 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1200, fill: 'both' }).finished;
             if (!live()) return;
@@ -275,7 +276,8 @@
         } finally { state.running = false; }
       }
       function renderStage(current) {
-        document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
+        const lastGateAction = current?.judge.filter((line) => /\bdenied\b/i.test(line) || /^Executed:/.test(line)).at(-1);
+        document.querySelector('#denied-stamp').hidden = !lastGateAction || !/\bdenied\b/i.test(lastGateAction);
         document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
           const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;
           for (const [className, text] of [['order-id', order.orderId], ['amount', order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)], ['order-state', order.status]]) {

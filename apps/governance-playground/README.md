@@ -1,5 +1,15 @@
 # Governance playground
 
+### Runtime-to-browser acceptance (fake model)
+
+With Playwright already installed externally and Chrome available, run from the repo root:
+
+```sh
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs CHROME_PATH=/absolute/path/to/chrome pnpm --filter governance-playground exec vitest run src/missions.e2e.test.ts
+```
+
+This opt-in test creates an isolated embedded Postgres database, real runtime and MCP server, and a real feed server. It generates all five Mission scenarios with a fake model, then checks browser selection, approval and failure states, and synchronized Shop, Judge, Record and Evidence without API interception. Set `MISSION_SCREENSHOT` to save a screenshot outside the repository. The ordinary test suite skips this browser test when `PLAYWRIGHT_MODULE` is unset; no browser dependency or model key is required for the ordinary suite.
+
 ### Mission navigation
 
 CLI runs record their scenario in invocation metadata. Missions follow the newest task by default, before any Judge verdict exists. Click a Mission to pin its latest case; Shop Floor, Judge, Record and Evidence switch together. Click **Follow latest task** to resume following. Empty Missions show no execution, and older runs without scenario metadata appear under **Unclassified**. Status badges report database task state; evidence playback is separate and does not execute tools. Rerun a scenario to label it; existing records are not guessed or rewritten.
