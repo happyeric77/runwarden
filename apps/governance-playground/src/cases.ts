@@ -27,6 +27,12 @@ export function buildCases(events: CaseEvent[]) {
       const judge: string[] = [];
       for (let i = 0; i < rawEvents.length; i++) {
         const event = rawEvents[i]!;
+        if (
+          event.kind === 'decision' &&
+          event.rule === 'input_validation' &&
+          event.decision === 'deny'
+        )
+          judge.push('Wrong account. Denied before it ran.');
         if (event.kind === 'decision' && event.tool)
           chips.push(`${event.tool}: ${event.decision}`);
         if (event.kind === 'audit' && event.tool)
@@ -120,6 +126,20 @@ export function buildCases(events: CaseEvent[]) {
       }
       return {
         invocationId,
+        scenario:
+          invocation?.snapshot &&
+          typeof invocation.snapshot === 'object' &&
+          'playgroundScenario' in invocation.snapshot &&
+          typeof invocation.snapshot.playgroundScenario === 'string' &&
+          [
+            'refund-three',
+            'refund-large',
+            'email-claim',
+            'refund-wrong-account',
+            'ask',
+          ].includes(invocation.snapshot.playgroundScenario)
+            ? invocation.snapshot.playgroundScenario
+            : null,
         startedAt: invocation?.at ?? rawEvents[0]!.at,
         status: invocation?.status ?? null,
         orders: [...orders.values()],

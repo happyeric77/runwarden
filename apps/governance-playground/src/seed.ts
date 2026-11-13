@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { createDb, initDb } from 'runwarden';
 
 import { ensureShopSchema, shopCounts, type ShopCounts } from './shop.js';
+import { ORDERS } from './seed-orders.js';
 
 const CUSTOMERS = [
   ['cus_01', 'Ada Lopez', 'ada@example.com'],
@@ -22,20 +23,6 @@ const PRODUCTS = [
   ['prd_06', 'Monitor', 240],
   ['prd_07', 'Chair', 360],
   ['prd_08', 'Desk', 540],
-] as const;
-
-// Amounts sit on both sides of USD 50. ord_07 is already fully refunded.
-const ORDERS = [
-  ['ord_01', 'cus_01', 'placed', 25],
-  ['ord_02', 'cus_02', 'placed', 49.5],
-  ['ord_03', 'cus_03', 'placed', 50],
-  ['ord_04', 'cus_02', 'shipped', 75],
-  ['ord_05', 'cus_03', 'shipped', 120],
-  ['ord_06', 'cus_04', 'placed', 15],
-  ['ord_07', 'cus_04', 'refunded', 80],
-  ['ord_08', 'cus_05', 'shipped', 200],
-  ['ord_09', 'cus_05', 'cancelled', 30],
-  ['ord_10', 'cus_06', 'placed', 500],
 ] as const;
 
 const REFUNDS = [['ref_01', 'ord_07', 80]] as const;

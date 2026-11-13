@@ -70,7 +70,9 @@
       p { color: #93a5c4; font-size: 13px; line-height: 1.6; }
       #missions .card { padding: 16px; margin-bottom: 12px; background: #19263f; }
       #missions code { font-size: 11px; color: #93a5c4; }
-      .active { border-color: #57a8ff; box-shadow: 0 0 0 1px #57a8ff; }
+      #missions .card.active { border-color: #57a8ff; box-shadow: 0 0 0 1px #57a8ff; background: #203653; }
+      #missions button.card { display: block; width: 100%; text-align: left; color: inherit; }
+      .mission-status { display: block; margin-top: 10px; color: #57a8ff; font-size: 11px; }
       .agent-badge { display: inline-block; border: 1px solid #57a8ff; color: #e8eef9; background: #203653; border-radius: 8px; padding: 12px 18px; font-weight: 700; font-size: 13px; }
       .bad-habits { display: block; border: 1px solid #f0564f; color: #f0564f; background: #361e27; border-radius: 24px; padding: 9px; text-align: center; font-size: 11px; margin-top: 16px; }
       #shop-floor, #judge { min-height: 590px; }
@@ -121,9 +123,13 @@
     <header><div class="brand">RUNWARDEN <span class="subtitle">GOVERNANCE PLAYGROUND</span></div><span id="stage-status">WAITING FOR CASE</span></header>
     <main class="stage">
       <aside><section class="panel" id="missions"><h2>Missions</h2>
-        <article class="card" id="burst"><h3>Burst refunds</h3><p>Three refunds meet the policy gate.</p><code>pnpm play refund-three</code></article>
-        <article class="card"><h3>Big refund</h3><p>A large refund awaits approval.</p><code>pnpm play refund-large</code></article>
-        <article class="card"><h3>Email claim</h3><p>Check what actually happened.</p><code>pnpm play email-claim</code></article>
+        <button type="button" class="card" id="burst" data-scenario="refund-three"><h3>Burst refunds</h3><code>pnpm play refund-three</code><span class="mission-status"></span></button>
+        <button type="button" class="card" data-scenario="refund-large"><h3>Big refund</h3><code>pnpm play refund-large</code><span class="mission-status"></span></button>
+        <button type="button" class="card" data-scenario="email-claim"><h3>Email claim</h3><code>pnpm play email-claim</code><span class="mission-status"></span></button>
+        <button type="button" class="card" id="wrong-account" data-scenario="refund-wrong-account"><h3>Wrong-account refund</h3><code>pnpm play refund-wrong-account</code><span class="mission-status"></span></button>
+        <button type="button" class="card" data-scenario="ask"><h3>Custom task</h3><code>pnpm play ask "&lt;text&gt;"</code><span class="mission-status"></span></button>
+        <button type="button" class="card" data-scenario="unclassified"><h3>Unclassified</h3><span class="mission-status"></span></button>
+        <button type="button" id="follow">Following latest task</button>
       </section><section class="panel"><h2>The Agent</h2><span class="agent-badge">AI AGENT</span><span class="bad-habits">BAD HABITS: ON</span></section></aside>
       <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div></section>
       <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol><section id="record"><h2>Record</h2><div id="record-lines"></div></section></section>
@@ -145,6 +151,56 @@
       let lastSignature = '';
       let playbackGeneration = 0;
       let playback;
+      let allCases = [];
+      let selectedMission = null;
+      let allApprovals = [];
+      document.querySelectorAll('[data-scenario]').forEach((button) => button.addEventListener('click', () => {
+        selectedMission = button.dataset.scenario;
+        selectCase();
+      }));
+      document.querySelector('#follow').addEventListener('click', () => { selectedMission = null; selectCase(); });
+      function selectCase() {
+        const missionOf = (item) => item.scenario ?? 'unclassified';
+        const current = selectedMission === null ? allCases[0] : allCases.find((item) => missionOf(item) === selectedMission);
+        const selected = selectedMission ?? (current ? missionOf(current) : null);
+        document.querySelectorAll('[data-scenario]').forEach((button) => {
+          const latest = allCases.find((item) => missionOf(item) === button.dataset.scenario);
+          const active = button.dataset.scenario === selected;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-pressed', String(active));
+          button.querySelector('.mission-status').textContent = `${active ? 'Viewing · ' : ''}${latest ? `Case ${latest.invocationId} · ${latest.status ?? 'unknown'}` : 'No execution yet'}`;
+        });
+        document.querySelector('#follow').textContent = selectedMission === null ? 'Following latest task' : 'Follow latest task';
+        const changed = current?.invocationId !== currentCase?.invocationId;
+        currentCase = current;
+        document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'NO EXECUTION YET';
+        document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'No execution yet. Run the CLI command shown in the selected Mission.';
+        document.querySelector('#replay').disabled = !current;
+        const signature = JSON.stringify(current);
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          if (current) playCase(current, changed || !playback).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
+          else {
+            playbackGeneration++; playback = null; renderStage(null);
+            document.querySelector('#record-lines').replaceChildren();
+            document.querySelector('#correction').hidden = true;
+            document.querySelector('.gate').classList.remove('open');
+            document.querySelector('#playback-label').textContent = 'No evidence for this Mission.';
+          }
+        }
+        list.replaceChildren(...(current?.events ?? []).map((event) => {
+          const row = document.createElement('li');
+          row.textContent = `${new Date(event.at).toLocaleString()} · ${event.kind} · ${event.tool ?? ''} · ${event.rule ?? ''} · ${event.decision ?? event.status ?? ''} · ${JSON.stringify(event.snapshot)}`;
+          return row;
+        }));
+        const approvals = allApprovals.filter((item) => item.invocationId === current?.invocationId);
+        document.querySelector('#pending').hidden = approvals.length === 0;
+        document.querySelector('#pending-list').replaceChildren(...approvals.map((approval) => {
+          const row = document.createElement('li');
+          row.textContent = `${approval.invocationId}: ${approval.tool} ${JSON.stringify(approval.input)}`;
+          return row;
+        }));
+      }
       const pause = (ms) => new Promise((resolve) => setTimeout(resolve, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
       document.querySelector('#replay').addEventListener('click', () => currentCase && playCase(currentCase));
       async function playCase(current, reset = true) {
@@ -199,6 +255,7 @@
             token.className = 'chip succeeded';
             token.textContent = order ? `issue_refund ${order.orderId}` : text;
             document.querySelector('#chips').replaceChildren(token);
+            document.querySelector('#denied-stamp').hidden = true;
             document.querySelector('.gate').classList.add('open');
             await token.animate([{ transform: 'translateX(-100px)', opacity: 1 }, { transform: 'translateX(240px)', opacity: 0 }], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1200, fill: 'both' }).finished;
             if (!live()) return;
@@ -219,7 +276,8 @@
         } finally { state.running = false; }
       }
       function renderStage(current) {
-        document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
+        const lastGateAction = current?.judge.filter((line) => /\bdenied\b/i.test(line) || /^Executed:/.test(line)).at(-1);
+        document.querySelector('#denied-stamp').hidden = !lastGateAction || !/\bdenied\b/i.test(lastGateAction);
         document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
           const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;
           for (const [className, text] of [['order-id', order.orderId], ['amount', order.amount == null ? 'Amount unavailable' : '$' + order.amount.toFixed(2)], ['order-state', order.status]]) {
@@ -244,61 +302,15 @@
         try {
           const response = await fetch('/api/events', { cache: 'no-store' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const { events, stats, pendingApprovals } = await response.json();
+          const { stats, pendingApprovals } = await response.json();
           const casesResponse = await fetch('/api/cases', { cache: 'no-store' });
           if (!casesResponse.ok) throw new Error(`HTTP ${casesResponse.status}`);
           const { cases } = await casesResponse.json();
-          const current = cases[0];
-          document.querySelector('#stage-status').textContent = current ? `CASE ${current.invocationId} · ${current.status ?? 'unknown'}` : 'WAITING FOR CASE';
-          const changedCase = current?.invocationId !== currentCase?.invocationId;
-          currentCase = current;
-          document.querySelector('#replay').disabled = !current;
-          document.querySelector('#burst').classList.toggle('active', !!current?.judge.some((line) => line.startsWith('Agent tried ')));
-          document.querySelector('#case-status').textContent = current ? `${current.invocationId} · ${current.status ?? 'unknown'}` : 'Waiting for a case.';
-          const signature = JSON.stringify(current);
-          if (signature !== lastSignature) {
-            lastSignature = signature;
-            if (current) playCase(current, changedCase || !playback).catch((error) => { document.querySelector('#playback-label').textContent = `Playback unavailable: ${error.message}`; });
-            else { playbackGeneration++; renderStage(null); }
-          }
+          allCases = cases;
+          allApprovals = pendingApprovals;
+          selectCase();
           document.querySelector('#stats').textContent =
             `Invocations: ${stats.invocations} | Denies: ${stats.denies} | Corrections: ${stats.corrections} | Awaiting approval: ${stats.awaitingApproval}`;
-          document.querySelector('#pending').hidden =
-            pendingApprovals.length === 0;
-          document.querySelector('#pending-list').replaceChildren(
-            ...pendingApprovals.map((approval) => {
-              const row = document.createElement('li');
-              row.textContent = `${approval.invocationId}: ${approval.tool} ${JSON.stringify(approval.input)}`;
-              return row;
-            }),
-          );
-          const rows = events.map((event) => {
-            const row = document.createElement('li');
-            const time = document.createElement('time');
-            time.dateTime = event.at;
-            time.textContent = new Date(event.at).toLocaleString();
-            const badge = document.createElement('span');
-            badge.className = 'badge';
-            if (['deny', 'rejected'].includes(event.decision))
-              badge.classList.add('red');
-            else if (
-              ['correction_issued', 'approval_requested'].includes(
-                event.decision,
-              )
-            )
-              badge.classList.add('yellow');
-            else if (
-              ['allow', 'approved'].includes(event.decision) ||
-              (event.kind === 'audit' && event.status === 'succeeded')
-            )
-              badge.classList.add('green');
-            badge.textContent = event.kind;
-            const summary = document.createElement('span');
-            summary.textContent = event.summary;
-            row.append(time, badge, summary);
-            return row;
-          });
-          list.replaceChildren(...rows);
           document.querySelector('#message').textContent = '';
         } catch (error) {
           document.querySelector('#message').textContent =

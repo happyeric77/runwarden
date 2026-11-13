@@ -38,7 +38,7 @@ export async function startFeedServer(port: number) {
           select * from (
             select created_at as at, 'invocation' as kind, id::text as "invocationId",
                    null::text as tool, null::text as rule, null::text as decision,
-                   status::text as status, null::jsonb as snapshot
+                    status::text as status, metadata as snapshot
               from agent_runtime.invocations
             union all
             select created_at, 'decision', invocation_id::text, tool_name, rule, decision,

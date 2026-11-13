@@ -36,6 +36,7 @@ create table if not exists refunds (
   order_id text not null,
   amount numeric(12,2) not null
 );
+alter table refunds add column if not exists destination_customer_id text;
 create table if not exists sent_emails (
   id text primary key,
   customer_id text not null,
@@ -206,8 +207,9 @@ export async function issueRefund(
 
       const id = `ref_${randomUUID()}`;
       await client.query(
-        'insert into refunds (id, order_id, amount) values ($1, $2, $3)',
-        [id, input.orderId, input.amount],
+        `insert into refunds (id, order_id, amount, destination_customer_id)
+         select $1, id, $3, coalesce($4, customer_id) from orders where id = $2`,
+        [id, input.orderId, input.amount, input.destinationCustomerId ?? null],
       );
       const updated = await client.query<{ status: string }>(
         `update orders
