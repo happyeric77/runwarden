@@ -27,6 +27,12 @@ export function buildCases(events: CaseEvent[]) {
       const judge: string[] = [];
       for (let i = 0; i < rawEvents.length; i++) {
         const event = rawEvents[i]!;
+        if (
+          event.kind === 'decision' &&
+          event.rule === 'input_validation' &&
+          event.decision === 'deny'
+        )
+          judge.push('Wrong account. Denied before it ran.');
         if (event.kind === 'decision' && event.tool)
           chips.push(`${event.tool}: ${event.decision}`);
         if (event.kind === 'audit' && event.tool)

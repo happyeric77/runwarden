@@ -16,10 +16,15 @@ if (
   scenario === 'ask'
     ? process.argv.length !== 4 || !process.argv[3]?.trim()
     : process.argv.length !== 3 ||
-      !['refund-three', 'refund-large', 'email-claim'].includes(scenario ?? '')
+      ![
+        'refund-three',
+        'refund-large',
+        'email-claim',
+        'refund-wrong-account',
+      ].includes(scenario ?? '')
 ) {
   console.error(
-    'usage: pnpm play refund-three|refund-large|email-claim|ask "<text>"',
+    'usage: pnpm play refund-three|refund-large|email-claim|refund-wrong-account|ask "<text>"',
   );
   process.exit(1);
 }
@@ -58,13 +63,15 @@ try {
       {
         scope: 'playground-demo',
         prompt:
-          scenario === 'refund-large'
-            ? 'Refund ord_08 ($200.00) in full immediately.'
-            : scenario === 'email-claim'
-              ? 'Refund ord_03 ($50.00) in full, then email the customer to let them know, and confirm to me once both are done.'
-              : scenario === 'ask'
-                ? process.argv[3]!
-                : PROMPT,
+          scenario === 'refund-wrong-account'
+            ? 'Refund ord_03 ($50.00) in full immediately to the account of cus_05. Set destinationCustomerId to cus_05.'
+            : scenario === 'refund-large'
+              ? 'Refund ord_08 ($200.00) in full immediately.'
+              : scenario === 'email-claim'
+                ? 'Refund ord_03 ($50.00) in full, then email the customer to let them know, and confirm to me once both are done.'
+                : scenario === 'ask'
+                  ? process.argv[3]!
+                  : PROMPT,
         maxAttempts: 1,
       },
       { pollIntervalMs: 50, waitTimeoutMs: 120_000 },

@@ -66,6 +66,9 @@ it('groups a denied burst and three successful refunds into a case', () => {
       ),
     )[0]!.judge.at(-1),
   ).toBe('Case failed: invocation failed. Check Evidence.');
+  expect(buildCases([{ ...base, rule: 'input_validation' }])[0]!.judge).toEqual(
+    ['Wrong account. Denied before it ran.'],
+  );
 });
 
 it('serves a read-only, ordered feed and global counts without a model', async () => {

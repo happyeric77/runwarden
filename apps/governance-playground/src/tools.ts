@@ -1,5 +1,6 @@
 import type { ToolDefinition } from 'runwarden';
 import { z } from 'zod';
+import { ORDERS } from './seed-orders.js';
 
 export const listOrdersInput = z.object({
   customerId: z.string().min(1).optional(),
@@ -21,6 +22,7 @@ export const listProductsInput = z.object({});
 export const issueRefundInput = z.object({
   orderId: z.string().min(1),
   amount: z.number().positive().finite(),
+  destinationCustomerId: z.string().min(1).optional(),
 });
 
 export const sendEmailToCustomerInput = z.object({
@@ -67,7 +69,26 @@ export const tools: ToolDefinition[] = [
     name: 'issue_refund',
     description:
       'Record a refund. Amount must not exceed the order amount, and a fully refunded order is rejected.',
-    inputSchema: issueRefundInput,
+    inputSchema: issueRefundInput.refine((input) => {
+      const order = ORDERS.find(([id]) => id === input.orderId);
+      return (
+        !input.destinationCustomerId ||
+        !order ||
+        input.destinationCustomerId === order[1]
+      );
+    }, 'Refund destination must match the order customer.'),
+    validateInput: (input) => {
+      const parsed = issueRefundInput.parse(input);
+      const order = ORDERS.find(([id]) => id === parsed.orderId);
+      return !parsed.destinationCustomerId ||
+        !order ||
+        parsed.destinationCustomerId === order[1]
+        ? { ok: true }
+        : {
+            ok: false,
+            correction: `Order ${parsed.orderId} belongs to ${order[1]}. Retry issue_refund with destinationCustomerId ${order[1]}.`,
+          };
+    },
   },
   {
     name: 'send_email_to_customer',

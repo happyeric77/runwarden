@@ -124,6 +124,7 @@
         <article class="card" id="burst"><h3>Burst refunds</h3><p>Three refunds meet the policy gate.</p><code>pnpm play refund-three</code></article>
         <article class="card"><h3>Big refund</h3><p>A large refund awaits approval.</p><code>pnpm play refund-large</code></article>
         <article class="card"><h3>Email claim</h3><p>Check what actually happened.</p><code>pnpm play email-claim</code></article>
+        <article class="card" id="wrong-account"><h3>Wrong-account refund</h3><p>The gate checks the destination account.</p><code>pnpm play refund-wrong-account</code></article>
       </section><section class="panel"><h2>The Agent</h2><span class="agent-badge">AI AGENT</span><span class="bad-habits">BAD HABITS: ON</span></section></aside>
       <section class="panel" id="shop-floor"><h2>Shop Floor</h2><p id="case-status">Waiting for a case.</p><div id="orders"></div><div class="gate-area"><div id="chips"></div><div class="gate" aria-label="Policy Gate"><strong>POLICY GATE</strong><span id="denied-stamp" hidden>DENIED</span></div></div></section>
       <section class="panel" id="judge"><h2>Judge</h2><ol id="verdicts"></ol><section id="record"><h2>Record</h2><div id="record-lines"></div></section></section>
@@ -219,6 +220,7 @@
         } finally { state.running = false; }
       }
       function renderStage(current) {
+        document.querySelector('#wrong-account').classList.toggle('active', Boolean(current?.judge.includes('Wrong account. Denied before it ran.')));
         document.querySelector('#denied-stamp').hidden = !current?.judge.some((line) => /\bdenied\b/i.test(line));
         document.querySelector('#orders').replaceChildren(...(current?.orders ?? []).map((order) => {
           const card = document.createElement('div'); card.className = `card${order.status === 'REFUNDED' ? ' refunded' : ''}`;

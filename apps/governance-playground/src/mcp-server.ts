@@ -113,6 +113,7 @@ function buildServer(pool: import('pg').Pool): McpServer {
 }
 
 function zodShape(schema: z.ZodType): z.ZodRawShape {
+  if (schema instanceof z.ZodEffects) return zodShape(schema.innerType());
   if (!(schema instanceof z.ZodObject)) {
     throw new Error('tool inputSchema must be an object');
   }
