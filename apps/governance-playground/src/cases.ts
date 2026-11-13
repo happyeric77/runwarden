@@ -126,6 +126,20 @@ export function buildCases(events: CaseEvent[]) {
       }
       return {
         invocationId,
+        scenario:
+          invocation?.snapshot &&
+          typeof invocation.snapshot === 'object' &&
+          'playgroundScenario' in invocation.snapshot &&
+          typeof invocation.snapshot.playgroundScenario === 'string' &&
+          [
+            'refund-three',
+            'refund-large',
+            'email-claim',
+            'refund-wrong-account',
+            'ask',
+          ].includes(invocation.snapshot.playgroundScenario)
+            ? invocation.snapshot.playgroundScenario
+            : null,
         startedAt: invocation?.at ?? rawEvents[0]!.at,
         status: invocation?.status ?? null,
         orders: [...orders.values()],

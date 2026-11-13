@@ -92,8 +92,8 @@ it('serves a read-only, ordered feed and global counts without a model', async (
     db = createDb(process.env.DATABASE_URL);
     await initDb(db);
     const invocation = await db.pool.query<{ id: string }>(
-      `insert into agent_runtime.invocations (scope, input, status, updated_at)
-       values ('feed-test', '{}', 'awaiting_approval', '2024-01-01T00:00:00Z') returning id`,
+      `insert into agent_runtime.invocations (scope, input, status, updated_at, metadata)
+       values ('feed-test', '{}', 'awaiting_approval', '2024-01-01T00:00:00Z', '{"playgroundScenario":"refund-large"}') returning id`,
     );
     const id = invocation.rows[0]!.id;
     const runId = randomUUID();
@@ -173,6 +173,7 @@ it('serves a read-only, ordered feed and global counts without a model', async (
     expect(cases.cases[0]).toMatchObject({
       invocationId: id,
       status: 'awaiting_approval',
+      scenario: 'refund-large',
     });
     expect(cases.cases[0]!.judge).toContain(
       'Correction issued. Retry one by one.',

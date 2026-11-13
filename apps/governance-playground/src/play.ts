@@ -62,6 +62,7 @@ try {
     const result = await runtime.invoke(
       {
         scope: 'playground-demo',
+        metadata: { playgroundScenario: scenario },
         prompt:
           scenario === 'refund-wrong-account'
             ? 'Refund ord_03 ($50.00) in full immediately to the account of cus_05. Set destinationCustomerId to cus_05.'

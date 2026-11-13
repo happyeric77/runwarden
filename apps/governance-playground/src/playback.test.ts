@@ -53,4 +53,24 @@ it('continues updated evidence without replaying completed calls', async () => {
     })();
   `);
   expect(nodes.get('#record-lines').children).toHaveLength(3);
+  await runInNewContext(
+    `
+    playCase = () => Promise.resolve();
+    allCases = [
+      { invocationId: '2', scenario: 'refund-wrong-account', status: 'running', events: [] },
+      { invocationId: '1', scenario: 'refund-three', status: 'succeeded', events: [] }
+    ];
+    selectCase();
+    if (currentCase.invocationId !== '2') throw Error('latest not selected');
+    selectedMission = 'refund-three'; selectCase();
+    allCases.unshift({ invocationId: '3', scenario: 'ask', status: 'failed', events: [] });
+    selectCase();
+    if (currentCase.invocationId !== '1') throw Error('selection stolen');
+    selectedMission = 'email-claim'; selectCase();
+    if (currentCase !== undefined) throw Error('empty mission retained case');
+    selectedMission = null; selectCase();
+    if (currentCase.invocationId !== '3') throw Error('follow not restored');
+  `,
+    context,
+  );
 });
