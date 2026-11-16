@@ -42,7 +42,7 @@ import {
   openAiCompatible,
   type OpenAiCompatibleModelConfig,
 } from './runtime/model.js';
-import { emptyInvocationUsage } from './runtime/usage.js';
+import { emptyInvocationUsage, usageStepsOverflow } from './runtime/usage.js';
 
 export type { DatabaseHandle } from './db/client.js';
 
@@ -259,7 +259,11 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
                 cacheWriteTokens: row.cacheWriteTokens ?? 0,
                 reasoningTokens: row.reasoningTokens ?? 0,
                 ...(row.costUsd === null ? {} : { costUsd: row.costUsd }),
-                costIncomplete: row.usageSteps.some((step) => !step.costKnown),
+                costIncomplete:
+                  row.usageSteps.some((step) => !step.costKnown) ||
+                  (row.usageSteps.some((step) => step.costKnown) &&
+                    row.costUsd === null) ||
+                  usageStepsOverflow(row.usageSteps),
                 steps: row.usageSteps,
               }
             : { ...emptyInvocationUsage(), costIncomplete: true },

@@ -23,6 +23,40 @@ const EMPTY_TOKENS: UsageTokenCounts = {
   reasoningTokens: 0,
 };
 
+const TOKEN_KEYS = Object.keys(EMPTY_TOKENS) as Array<keyof UsageTokenCounts>;
+
+function sumTokens(steps: readonly UsageStep[]): {
+  tokens: UsageTokenCounts;
+  overflow: boolean;
+} {
+  const tokens = { ...EMPTY_TOKENS };
+  let overflow = false;
+
+  for (const key of TOKEN_KEYS) {
+    let total = 0;
+    for (const step of steps) {
+      const value = step[key];
+      if (!Number.isSafeInteger(value) || value < 0) {
+        overflow = true;
+        continue;
+      }
+      total += value;
+      if (total > Number.MAX_SAFE_INTEGER) {
+        overflow = true;
+        total = Number.MAX_SAFE_INTEGER;
+        break;
+      }
+    }
+    tokens[key] = total;
+  }
+
+  return { tokens, overflow };
+}
+
+export function usageStepsOverflow(steps: readonly UsageStep[]): boolean {
+  return sumTokens(steps).overflow;
+}
+
 export function emptyInvocationUsage(): InvocationUsage {
   return { ...EMPTY_TOKENS, costIncomplete: false, steps: [] };
 }
@@ -247,24 +281,12 @@ export function buildInvocationUsage(
     knownCostTotal < 1e18
       ? knownCostTotal
       : undefined;
+  const { tokens: totals, overflow: tokensIncomplete } = sumTokens(steps);
   return {
-    ...EMPTY_TOKENS,
-    inputTokens: steps.reduce((total, step) => total + step.inputTokens, 0),
-    outputTokens: steps.reduce((total, step) => total + step.outputTokens, 0),
-    cacheReadTokens: steps.reduce(
-      (total, step) => total + step.cacheReadTokens,
-      0,
-    ),
-    cacheWriteTokens: steps.reduce(
-      (total, step) => total + step.cacheWriteTokens,
-      0,
-    ),
-    reasoningTokens: steps.reduce(
-      (total, step) => total + step.reasoningTokens,
-      0,
-    ),
+    ...totals,
     ...(costUsd !== undefined ? { costUsd } : {}),
     costIncomplete:
+      tokensIncomplete ||
       steps.some((step) => !step.costKnown) ||
       (knownCosts.length > 0 && costUsd === undefined),
     steps,

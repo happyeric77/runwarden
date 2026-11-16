@@ -214,6 +214,35 @@ describe('buildInvocationUsage', () => {
     });
   });
 
+  it('clamps overflowing aggregate tokens and marks accounting incomplete', () => {
+    const max = Number.MAX_SAFE_INTEGER;
+    const stepUsage = {
+      inputTokens: max,
+      inputTokenDetails: {
+        noCacheTokens: max,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      outputTokens: 0,
+      outputTokenDetails: { textTokens: 0, reasoningTokens: 0 },
+      totalTokens: max,
+    };
+    const result = buildInvocationUsage(
+      [
+        { usage: stepUsage, provider: 'local', model: 'private-model' },
+        { usage: stepUsage, provider: 'local', model: 'private-model' },
+      ],
+      { overrides: [override] },
+    );
+
+    expect(result).toMatchObject({
+      inputTokens: max,
+      costIncomplete: true,
+    });
+    expect(result.costUsd).toBeGreaterThan(0);
+    expect(result.steps.every((step) => step.costKnown)).toBe(true);
+  });
+
   it('uses the step provider to select the catalog price', () => {
     const result = buildInvocationUsage([
       {
