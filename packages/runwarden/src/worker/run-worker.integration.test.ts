@@ -820,6 +820,72 @@ describe('durable defineRuntime', () => {
     }
   });
 
+  it('completes successfully when provider usage contains invalid token counts', async () => {
+    const model = new MockLanguageModelV4({
+      modelId: 'invalid-usage-model',
+      doGenerate: async () => ({
+        content: [{ type: 'text', text: 'Still completed.' }] as never,
+        finishReason: { unified: 'stop', raw: 'stop' } as const,
+        usage: {
+          inputTokens: {
+            total: Number.NaN,
+            noCache: 1.5,
+            cacheRead: -1,
+            cacheWrite: 0,
+          },
+          outputTokens: { total: 2, text: 2, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-invalid-usage', prompt: 'Finish anyway' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.text).toBe('Still completed.');
+      expect(result.usage).toMatchObject({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costIncomplete: true,
+      });
+      expect(result.usage).not.toHaveProperty('costUsd');
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({
+        status: 'succeeded',
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costUsd: null,
+      });
+      expect(row?.usageSteps?.[0]).toMatchObject({
+        usageKnown: false,
+        costKnown: false,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it('returns no messages for a row stored before result_messages existed', async () => {
     const runtime = defineRuntime({
       db: handle,

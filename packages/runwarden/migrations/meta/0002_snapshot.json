@@ -63,31 +63,31 @@
         },
         "input_tokens": {
           "name": "input_tokens",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
         "output_tokens": {
           "name": "output_tokens",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
         "cache_read_tokens": {
           "name": "cache_read_tokens",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
         "cache_write_tokens": {
           "name": "cache_write_tokens",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
         "reasoning_tokens": {
           "name": "reasoning_tokens",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
