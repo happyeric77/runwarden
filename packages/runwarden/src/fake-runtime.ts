@@ -25,14 +25,18 @@ export class FakeAgentRuntime implements AgentRuntime {
     if (typeof this.result === 'function') {
       return this.result(input, invocationIndex);
     }
-    return (
-      this.result ?? {
-        invocationId: input.invocationId,
-        runId: input.runId,
-        text: `Fake runtime response to: ${input.prompt}`,
-        provider: 'fake',
-        model: 'fake-agent-runtime',
-      }
-    );
+    if (this.result) return this.result;
+    const text = `Fake runtime response to: ${input.prompt}`;
+    return {
+      invocationId: input.invocationId,
+      runId: input.runId,
+      text,
+      messages: [
+        { role: 'user', content: input.prompt },
+        { role: 'assistant', content: text },
+      ],
+      provider: 'fake',
+      model: 'fake-agent-runtime',
+    };
   }
 }

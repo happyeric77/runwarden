@@ -113,6 +113,7 @@ describe('runWorker', () => {
           invocationId: input.invocationId,
           runId: 'run',
           text: `done ${input.prompt}`,
+          messages: [],
         };
       },
     };
@@ -176,6 +177,7 @@ describe('runWorker', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'a',
+              messages: [],
             };
           },
         },
@@ -198,6 +200,7 @@ describe('runWorker', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'b',
+              messages: [],
             };
           },
         },
@@ -246,6 +249,7 @@ describe('runWorker', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'retried',
+              messages: [],
             };
           },
         },
@@ -297,6 +301,7 @@ describe('runWorker', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'audited',
+              messages: [],
             };
           },
         },
@@ -362,6 +367,7 @@ describe('runWorker', () => {
                 invocationId: input.invocationId,
                 runId: input.runId,
                 text: 'not committed',
+                messages: [],
               };
             },
           },
@@ -411,6 +417,7 @@ describe('runWorker', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'late',
+              messages: [],
             };
           },
         },
@@ -2203,6 +2210,7 @@ describe('tool call audits', () => {
             invocationId: input.invocationId,
             runId: input.runId,
             text: 'Done',
+            messages: [],
           };
         },
       },
@@ -2280,6 +2288,7 @@ describe('tool call audits', () => {
               invocationId: input.invocationId,
               runId: input.runId,
               text: 'must not succeed',
+              messages: [],
             };
           },
         },

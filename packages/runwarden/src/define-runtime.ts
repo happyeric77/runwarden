@@ -246,6 +246,9 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           invocationId,
           runId: row.activeRunId!,
           text: row.resultText ?? '',
+          // Durable storage has no messages column; persisting the produced
+          // transcript would need a schema migration (out of scope for #33).
+          messages: [],
           provider: row.provider ?? undefined,
           model: row.model ?? undefined,
         };

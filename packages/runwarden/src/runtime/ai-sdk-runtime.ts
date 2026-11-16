@@ -3,9 +3,14 @@ import { randomUUID } from 'node:crypto';
 import {
   tool,
   ToolLoopAgent,
+  type AssistantModelMessage,
   type LanguageModel,
   type ModelMessage,
   type StepResultPerformance,
+  type TextPart,
+  type ToolCallPart,
+  type ToolModelMessage,
+  type ToolResultPart,
   type ToolSet,
 } from 'ai';
 import { z } from 'zod';
@@ -22,6 +27,10 @@ import type {
   InvocationResult,
   McpToolClient,
   McpToolSession,
+  NeutralContentPart,
+  NeutralMessage,
+  NeutralToolResultOutput,
+  NeutralToolResultPart,
   RuntimeInvocationInput,
   RuntimeMetrics,
   SystemPromptLoader,
@@ -162,20 +171,176 @@ function dropBlankOptionalStringArguments(
   return normalized;
 }
 
-function modelMessages(
-  history: readonly {
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-  }[],
+const DEFAULT_MAX_TOOL_RESULT_BYTES = 32 * 1024;
+
+type ModelContentPart = TextPart | ToolCallPart | ToolResultPart;
+type AssistantPart = Exclude<AssistantModelMessage['content'], string>[number];
+type ToolPart = ToolModelMessage['content'][number];
+type ToolResultOutput = ToolResultPart['output'];
+type ResponseMessage = AssistantModelMessage | ToolModelMessage;
+
+function toolResultOutputBytes(output: NeutralToolResultOutput): number {
+  switch (output.type) {
+    case 'text':
+    case 'error-text':
+      return Buffer.byteLength(output.value, 'utf8');
+    case 'json':
+    case 'error-json':
+      return Buffer.byteLength(JSON.stringify(output.value) ?? '', 'utf8');
+    case 'execution-denied':
+      return Buffer.byteLength(output.reason ?? '', 'utf8');
+  }
+}
+
+function toModelToolResultPart(
+  part: NeutralToolResultPart,
+  maxToolResultBytes: number,
+): ToolResultPart {
+  // Replayed tool results are governed exactly like live ones.
+  if (toolResultOutputBytes(part.output) > maxToolResultBytes) {
+    throw new AgentRuntimeError('failure', 'MCP tool result exceeded limit');
+  }
+  return {
+    type: 'tool-result',
+    toolCallId: part.toolCallId,
+    toolName: part.toolName,
+    output: part.output,
+  };
+}
+
+function toModelContentPart(part: NeutralContentPart): ModelContentPart {
+  switch (part.type) {
+    case 'text':
+      return { type: 'text', text: part.text };
+    case 'tool-call':
+      return {
+        type: 'tool-call',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: part.input,
+      };
+  }
+}
+
+function toModelMessage(
+  message: NeutralMessage,
+  maxToolResultBytes: number,
+): ModelMessage {
+  switch (message.role) {
+    case 'user':
+    case 'system':
+      return { role: message.role, content: message.content };
+    case 'assistant':
+      return {
+        role: 'assistant',
+        content:
+          typeof message.content === 'string'
+            ? message.content
+            : message.content.map((part) => toModelContentPart(part)),
+      };
+    case 'tool':
+      return {
+        role: 'tool',
+        content: message.content.map((part) =>
+          toModelToolResultPart(part, maxToolResultBytes),
+        ),
+      };
+  }
+}
+
+export function modelMessages(
+  history: readonly NeutralMessage[],
   input: RuntimeInvocationInput,
+  maxToolResultBytes = DEFAULT_MAX_TOOL_RESULT_BYTES,
 ): ModelMessage[] {
   return [
-    ...history.map((message) => ({
-      role: message.role,
-      content: message.content,
-    })),
+    ...history.map((message) => toModelMessage(message, maxToolResultBytes)),
     { role: 'user', content: input.prompt },
   ];
+}
+
+function toNeutralToolResultOutput(
+  output: ToolResultOutput,
+): NeutralToolResultOutput {
+  if (output.type === 'content') {
+    return {
+      type: 'text',
+      value: output.value
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join(''),
+    };
+  }
+  return output;
+}
+
+function toNeutralToolResultPart(part: ToolResultPart): NeutralToolResultPart {
+  return {
+    type: 'tool-result',
+    toolCallId: part.toolCallId,
+    toolName: part.toolName,
+    output: toNeutralToolResultOutput(part.output),
+  };
+}
+
+function toNeutralContentPart(
+  part: AssistantPart,
+): NeutralContentPart | undefined {
+  switch (part.type) {
+    case 'text':
+      return { type: 'text', text: part.text };
+    case 'tool-call':
+      return {
+        type: 'tool-call',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: part.input,
+      };
+    default:
+      return undefined;
+  }
+}
+
+function toNeutralToolContentPart(
+  part: ToolPart,
+): NeutralToolResultPart | undefined {
+  return part.type === 'tool-result'
+    ? toNeutralToolResultPart(part)
+    : undefined;
+}
+
+function toNeutralMessage(
+  message: ResponseMessage,
+): NeutralMessage | undefined {
+  switch (message.role) {
+    case 'assistant': {
+      if (typeof message.content === 'string') {
+        return message.content.length > 0
+          ? { role: 'assistant', content: message.content }
+          : undefined;
+      }
+      const parts = message.content
+        .map(toNeutralContentPart)
+        .filter((part): part is NeutralContentPart => part !== undefined);
+      return parts.length > 0
+        ? { role: 'assistant', content: parts }
+        : undefined;
+    }
+    case 'tool': {
+      const parts = message.content
+        .map(toNeutralToolContentPart)
+        .filter((part): part is NeutralToolResultPart => part !== undefined);
+      return parts.length > 0 ? { role: 'tool', content: parts } : undefined;
+    }
+  }
+}
+
+function producedNeutralMessages(
+  messages: readonly ResponseMessage[],
+): NeutralMessage[] {
+  return messages
+    .map(toNeutralMessage)
+    .filter((message): message is NeutralMessage => message !== undefined);
 }
 
 export class AiSdkNativeRuntime implements AgentRuntime {
@@ -280,7 +445,11 @@ export class AiSdkNativeRuntime implements AgentRuntime {
 
       // The SDK stops on text-only responses even while a correction is pending.
       // Resume the same conversation, not the invocation or its executed tools.
-      const messages = modelMessages(history, input);
+      const messages = modelMessages(
+        history,
+        input,
+        this.options.policies?.maxToolResultBytes,
+      );
       let result = await agent.generate({
         messages,
         timeout: this.remaining(startedAt),
@@ -321,6 +490,12 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         invocationId: input.invocationId,
         runId: input.runId,
         text,
+        messages: [
+          { role: 'user', content: input.prompt },
+          ...steps.flatMap((step) =>
+            producedNeutralMessages(step.response.messages),
+          ),
+        ],
         provider,
         model,
       };

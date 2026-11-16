@@ -17,6 +17,13 @@ describe('FakeAgentRuntime', () => {
       invocationId: 'inv-1',
       runId: 'run-1',
       text: 'Fake runtime response to: Hello',
+      messages: [
+        { role: 'user', content: 'Hello' },
+        {
+          role: 'assistant',
+          content: 'Fake runtime response to: Hello',
+        },
+      ],
       provider: 'fake',
       model: 'fake-agent-runtime',
     });

@@ -17,7 +17,7 @@ import type {
   ToolCallAuditEvent,
   ToolCallAuditSink,
 } from '../contracts/runtime.js';
-import { AiSdkNativeRuntime } from './ai-sdk-runtime.js';
+import { AiSdkNativeRuntime, modelMessages } from './ai-sdk-runtime.js';
 import { deriveToolCallIdempotencyKey } from './canonical-json.js';
 import { openAiCompatible } from './model.js';
 import { PolicyEngine } from './policy-engine.js';
@@ -977,6 +977,35 @@ describe('AiSdkNativeRuntime', () => {
       invocationId: invocation.invocationId,
       runId: invocation.runId,
       text: 'Record found',
+      messages: [
+        { role: 'user', content: invocation.prompt },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'call-1',
+              toolName: directoryTools.get,
+              input: { recordId: 7 },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'call-1',
+              toolName: directoryTools.get,
+              output: { type: 'text', value: '[{"type":"text","text":"ok"}]' },
+            },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Record found' }],
+        },
+      ],
       provider: 'mock-provider',
       model: 'mock-model',
     });
@@ -1647,5 +1676,179 @@ describe('AiSdkNativeRuntime', () => {
     });
     expect(subject.open).not.toHaveBeenCalled();
     expect(subject.callTool).not.toHaveBeenCalled();
+  });
+
+  it('round-trips first invocation tool results into the next invocation history', async () => {
+    const listResult =
+      '[{"type":"text","text":"1: booking one, 2: booking two, 3: booking three"}]';
+    const subject = runtime([
+      toolStep(
+        toolCall('list-1', scheduledTaskTools.list, {
+          query_mode: 'upcoming',
+        }),
+      ),
+      textStep('Listed three bookings.'),
+      textStep('Cancelling the second booking now.'),
+    ]);
+    subject.callTool.mockResolvedValueOnce(listResult);
+
+    const first = await subject.instance.invoke(invocation);
+    expect(first.messages).toEqual([
+      { role: 'user', content: invocation.prompt },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'list-1',
+            toolName: scheduledTaskTools.list,
+            input: { query_mode: 'upcoming' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'list-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'text', value: listResult },
+          },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Listed three bookings.' }],
+      },
+    ]);
+
+    subject.loadHistory.mockResolvedValueOnce(first.messages);
+    const second = await subject.instance.invoke({
+      ...invocation,
+      invocationId: 'inv-2',
+      prompt: 'Cancel the second one.',
+    });
+
+    expect(second.messages).toEqual([
+      { role: 'user', content: 'Cancel the second one.' },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Cancelling the second booking now.' }],
+      },
+    ]);
+    const secondPrompt = JSON.stringify(
+      subject.model.doGenerateCalls[2]?.prompt,
+    );
+    expect(secondPrompt).toContain('2: booking two');
+    expect(secondPrompt).toContain('list-1');
+  });
+});
+
+describe('modelMessages', () => {
+  it('maps plain text history exactly as before', () => {
+    expect(modelMessages(historyMessages, invocation)).toEqual([
+      { role: 'user', content: 'Earlier user message' },
+      { role: 'assistant', content: 'Prior assistant reply' },
+      { role: 'user', content: 'Current user message' },
+    ]);
+  });
+
+  it('maps tool-call and tool-result parts of the widened history', () => {
+    const toolResult = '[{"type":"text","text":"ok"}]';
+    const history: NeutralMessage[] = [
+      { role: 'user', content: 'List my tasks.' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Looking them up.' },
+          {
+            type: 'tool-call',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            input: { query_mode: 'upcoming' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'text', value: toolResult },
+          },
+        ],
+      },
+    ];
+
+    expect(modelMessages(history, invocation)).toEqual([
+      { role: 'user', content: 'List my tasks.' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Looking them up.' },
+          {
+            type: 'tool-call',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            input: { query_mode: 'upcoming' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'text', value: toolResult },
+          },
+        ],
+      },
+      { role: 'user', content: invocation.prompt },
+    ]);
+  });
+
+  it('applies maxToolResultBytes to replayed tool results', () => {
+    const history: NeutralMessage[] = [
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'text', value: 'x'.repeat(11) },
+          },
+        ],
+      },
+    ];
+
+    expect(() => modelMessages(history, invocation, 10)).toThrow(
+      'MCP tool result exceeded limit',
+    );
+  });
+
+  it('applies maxToolResultBytes to replayed execution-denied reasons', () => {
+    const history: NeutralMessage[] = [
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'execution-denied', reason: 'x'.repeat(11) },
+          },
+        ],
+      },
+    ];
+
+    expect(() => modelMessages(history, invocation, 10)).toThrow(
+      'MCP tool result exceeded limit',
+    );
   });
 });
