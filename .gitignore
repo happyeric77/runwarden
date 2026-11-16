@@ -4,3 +4,6 @@ dist/
 AGENTS.md
 CLAUDE.md
 .claude/
+.env
+.env.*
+!.env.example
