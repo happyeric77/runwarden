@@ -28,6 +28,7 @@ export type {
   InvocationResult,
   InvocationSettledListener,
   InvocationStatus,
+  InvocationUsage,
   McpToolClient,
   McpToolSession,
   NeutralContentPart,
@@ -42,6 +43,10 @@ export type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePriceOverride,
+  UsagePricingOptions,
+  UsageStep,
+  UsageTokenCounts,
 } from './contracts/runtime.js';
 
 export type {

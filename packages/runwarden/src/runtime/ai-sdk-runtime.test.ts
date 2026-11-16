@@ -16,6 +16,7 @@ import type {
   RuntimeMetrics,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
 } from '../contracts/runtime.js';
 import { AiSdkNativeRuntime, modelMessages } from './ai-sdk-runtime.js';
 import { deriveToolCallIdempotencyKey } from './canonical-json.js';
@@ -183,6 +184,7 @@ function runtime(
     onPolicyDecision?: (decision: PolicyDecision) => void;
     onToolCallAudit?: ToolCallAuditSink;
     toolError?: Error;
+    pricing?: UsagePricingOptions;
   } = {},
 ) {
   const model = new MockLanguageModelV4({
@@ -210,6 +212,7 @@ function runtime(
     onMetrics: options.onMetrics,
     onPolicyDecision: options.onPolicyDecision,
     onToolCallAudit: options.onToolCallAudit,
+    pricing: options.pricing,
     policies: {
       ...options.policies,
       ...(options.maxToolCallsPerInvocation !== undefined
@@ -1006,6 +1009,38 @@ describe('AiSdkNativeRuntime', () => {
           content: [{ type: 'text', text: 'Record found' }],
         },
       ],
+      usage: {
+        inputTokens: 6,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costIncomplete: true,
+        steps: [
+          {
+            inputTokens: 3,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            provider: 'mock-provider',
+            model: 'mock-model',
+            usageKnown: true,
+            costKnown: false,
+          },
+          {
+            inputTokens: 3,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            provider: 'mock-provider',
+            model: 'mock-model',
+            usageKnown: true,
+            costKnown: false,
+          },
+        ],
+      },
       provider: 'mock-provider',
       model: 'mock-model',
     });
@@ -1027,6 +1062,75 @@ describe('AiSdkNativeRuntime', () => {
     expect(JSON.stringify(subject.model.doGenerateCalls[1]?.prompt)).toContain(
       'ok',
     );
+  });
+
+  it('meters every step, including tool steps, into the invocation usage', async () => {
+    const richUsage = {
+      cachedInputTokens: undefined,
+      inputTokens: {
+        total: 10,
+        noCache: 4,
+        cacheRead: 3,
+        cacheWrite: 3,
+      },
+      outputTokens: { total: 6, text: 4, reasoning: 2 },
+    } as unknown as typeof usage;
+    const subject = runtime(
+      [
+        {
+          content: [toolCall('call-1', directoryTools.get, { recordId: 7 })],
+          finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' },
+          usage: richUsage,
+          warnings: [],
+        },
+        {
+          content: [{ type: 'text' as const, text: 'Record found' }],
+          finishReason: { unified: 'stop' as const, raw: 'stop' },
+          usage: richUsage,
+          warnings: [],
+        },
+      ],
+      {
+        pricing: {
+          overrides: [
+            {
+              model: 'mock-model',
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+              cacheReadPerMillionTokens: 0.5,
+              cacheWritePerMillionTokens: 0.25,
+            },
+          ],
+        },
+      },
+    );
+
+    const result = await subject.instance.invoke(invocation);
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 8,
+      outputTokens: 8,
+      cacheReadTokens: 6,
+      cacheWriteTokens: 6,
+      reasoningTokens: 4,
+      costIncomplete: false,
+    });
+    expect(result.usage.costUsd).toBeCloseTo(0.0000365, 12);
+    expect(result.usage.steps).toHaveLength(2);
+    for (const step of result.usage.steps) {
+      expect(step).toMatchObject({
+        inputTokens: 4,
+        outputTokens: 4,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 3,
+        reasoningTokens: 2,
+        provider: 'mock-provider',
+        model: 'mock-model',
+        usageKnown: true,
+        costKnown: true,
+      });
+      expect(step.costUsd).toBeCloseTo(0.00001825, 12);
+    }
   });
 
   it('denies a multi-call step before MCP and lets the SDK request one corrected tool', async () => {

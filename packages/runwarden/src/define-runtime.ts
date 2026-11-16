@@ -22,6 +22,7 @@ import type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
 } from './contracts/runtime.js';
 import type { DatabaseHandle } from './db/client.js';
 import {
@@ -41,6 +42,7 @@ import {
   openAiCompatible,
   type OpenAiCompatibleModelConfig,
 } from './runtime/model.js';
+import { emptyInvocationUsage } from './runtime/usage.js';
 
 export type { DatabaseHandle } from './db/client.js';
 
@@ -66,6 +68,7 @@ export interface DefineRuntimeOptions {
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
   policies?: RuntimePolicies;
+  pricing?: UsagePricingOptions;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
   onToolCallAudit?: ToolCallAuditSink;
@@ -197,6 +200,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     loadSystemPrompt: options.loadSystemPrompt,
     loadHistory: options.loadHistory,
     policies: options.policies,
+    pricing: options.pricing,
     onMetrics: options.onMetrics,
     onPolicyDecision: (decision) => {
       for (const listener of decisionListeners) listener(decision);
@@ -247,6 +251,18 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           runId: row.activeRunId!,
           text: row.resultText ?? '',
           messages: row.resultMessages ?? [],
+          usage: row.usageSteps
+            ? {
+                inputTokens: row.inputTokens ?? 0,
+                outputTokens: row.outputTokens ?? 0,
+                cacheReadTokens: row.cacheReadTokens ?? 0,
+                cacheWriteTokens: row.cacheWriteTokens ?? 0,
+                reasoningTokens: row.reasoningTokens ?? 0,
+                ...(row.costUsd === null ? {} : { costUsd: row.costUsd }),
+                costIncomplete: row.usageSteps.some((step) => !step.costKnown),
+                steps: row.usageSteps,
+              }
+            : { ...emptyInvocationUsage(), costIncomplete: true },
           provider: row.provider ?? undefined,
           model: row.model ?? undefined,
         };

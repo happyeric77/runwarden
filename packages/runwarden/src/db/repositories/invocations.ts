@@ -3,8 +3,10 @@ import { sql } from 'drizzle-orm';
 import type {
   InvocationInput,
   InvocationRecord,
+  InvocationUsage,
   NeutralMessage,
   PendingToolCall,
+  UsageStep,
 } from '../../contracts/runtime.js';
 import type { Database } from '../client.js';
 import type { InvocationRow } from '../schema.js';
@@ -19,6 +21,16 @@ export function mapRow(raw: Record<string, unknown>): InvocationRow {
     input: raw.input as InvocationInput,
     resultText: (raw.result_text as string | null) ?? null,
     resultMessages: (raw.result_messages as NeutralMessage[] | null) ?? null,
+    inputTokens: raw.input_tokens == null ? null : Number(raw.input_tokens),
+    outputTokens: raw.output_tokens == null ? null : Number(raw.output_tokens),
+    cacheReadTokens:
+      raw.cache_read_tokens == null ? null : Number(raw.cache_read_tokens),
+    cacheWriteTokens:
+      raw.cache_write_tokens == null ? null : Number(raw.cache_write_tokens),
+    reasoningTokens:
+      raw.reasoning_tokens == null ? null : Number(raw.reasoning_tokens),
+    costUsd: raw.cost_usd == null ? null : Number(raw.cost_usd),
+    usageSteps: (raw.usage_steps as UsageStep[] | null) ?? null,
     idempotencyKey: (raw.idempotency_key as string | null) ?? null,
     status: raw.status as InvocationRow['status'],
     attemptCount: Number(raw.attempt_count),
@@ -242,6 +254,7 @@ export async function markInvocationSucceeded(
   result: {
     resultText: string;
     resultMessages?: NeutralMessage[];
+    usage?: InvocationUsage;
     provider?: string;
     model?: string;
   },
@@ -251,6 +264,13 @@ export async function markInvocationSucceeded(
     set status = 'succeeded',
         result_text = ${result.resultText},
         result_messages = ${result.resultMessages ? JSON.stringify(result.resultMessages) : null}::jsonb,
+        input_tokens = ${result.usage?.inputTokens ?? null},
+        output_tokens = ${result.usage?.outputTokens ?? null},
+        cache_read_tokens = ${result.usage?.cacheReadTokens ?? null},
+        cache_write_tokens = ${result.usage?.cacheWriteTokens ?? null},
+        reasoning_tokens = ${result.usage?.reasoningTokens ?? null},
+        cost_usd = ${result.usage?.costUsd ?? null},
+        usage_steps = ${result.usage ? JSON.stringify(result.usage.steps) : null}::jsonb,
         provider = ${result.provider ?? null},
         model = ${result.model ?? null},
         pending_tool_call = null,

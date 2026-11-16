@@ -215,6 +215,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         {
           resultText: result.text,
           resultMessages: result.messages,
+          usage: result.usage,
           provider: result.provider,
           model: result.model,
         },

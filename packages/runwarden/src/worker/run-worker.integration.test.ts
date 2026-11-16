@@ -27,6 +27,7 @@ import {
 } from '../db/test-postgres.js';
 import { defineRuntime, RUNTIME_INTERNALS } from '../define-runtime.js';
 import { FakeAgentRuntime } from '../fake-runtime.js';
+import { emptyInvocationUsage } from '../runtime/usage.js';
 import { runWorker } from './run-worker.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -114,6 +115,7 @@ describe('runWorker', () => {
           runId: 'run',
           text: `done ${input.prompt}`,
           messages: [],
+          usage: emptyInvocationUsage(),
         };
       },
     };
@@ -178,6 +180,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'a',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -201,6 +204,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'b',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -250,6 +254,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'retried',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -302,6 +307,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'audited',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -368,6 +374,7 @@ describe('runWorker', () => {
                 runId: input.runId,
                 text: 'not committed',
                 messages: [],
+                usage: emptyInvocationUsage(),
               };
             },
           },
@@ -418,6 +425,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'late',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -698,6 +706,120 @@ describe('durable defineRuntime', () => {
     }
   });
 
+  it('persists usage totals and per-step detail for a durable invocation', async () => {
+    const listResult =
+      '[{"type":"text","text":"1: booking one, 2: booking two"}]';
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool() {
+            return listResult;
+          },
+          async close() {},
+        };
+      },
+    };
+    const stepUsage = {
+      inputTokens: {
+        total: 10,
+        noCache: 4,
+        cacheRead: 3,
+        cacheWrite: 3,
+      },
+      outputTokens: { total: 6, text: 4, reasoning: 2 },
+    };
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: stepUsage,
+          warnings: [],
+        });
+        if (promptText.includes('1: booking one')) {
+          return finish([{ type: 'text', text: 'Found two bookings.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'usage-durable',
+            toolName: 'tasks__list_scheduled',
+            input: JSON.stringify({ query_mode: 'upcoming' }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      pricing: {
+        overrides: [
+          {
+            model: 'mock-model',
+            inputPerMillionTokens: 1,
+            outputPerMillionTokens: 2,
+            cacheReadPerMillionTokens: 0.5,
+            cacheWritePerMillionTokens: 0.25,
+          },
+        ],
+      },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-usage', prompt: 'List my tasks' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.usage).toMatchObject({
+        inputTokens: 8,
+        outputTokens: 8,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 6,
+        reasoningTokens: 4,
+        costIncomplete: false,
+      });
+      expect(result.usage.costUsd).toBeCloseTo(0.0000365, 12);
+      expect(result.usage.steps).toHaveLength(2);
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({
+        inputTokens: 8,
+        outputTokens: 8,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 6,
+        reasoningTokens: 4,
+      });
+      expect(row?.costUsd).toBeCloseTo(0.0000365, 12);
+      expect(row?.usageSteps).toEqual(result.usage.steps);
+
+      const readBack = await runtime.waitForInvocation(result.invocationId, {
+        pollIntervalMs: 10,
+        waitTimeoutMs: 1_000,
+      });
+      expect(readBack.usage).toEqual(result.usage);
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it('returns no messages for a row stored before result_messages existed', async () => {
     const runtime = defineRuntime({
       db: handle,
@@ -742,6 +864,15 @@ describe('durable defineRuntime', () => {
     });
     expect(result.text).toBe('legacy result');
     expect(result.messages).toEqual([]);
+    expect(result.usage).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costIncomplete: true,
+      steps: [],
+    });
   });
 });
 
@@ -2359,6 +2490,7 @@ describe('tool call audits', () => {
             runId: input.runId,
             text: 'Done',
             messages: [],
+            usage: emptyInvocationUsage(),
           };
         },
       },
@@ -2437,6 +2569,7 @@ describe('tool call audits', () => {
               runId: input.runId,
               text: 'must not succeed',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
