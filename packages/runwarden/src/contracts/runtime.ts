@@ -78,10 +78,7 @@ export interface NeutralToolResultPart {
   output: NeutralToolResultOutput;
 }
 
-export type NeutralContentPart =
-  | NeutralTextPart
-  | NeutralToolCallPart
-  | NeutralToolResultPart;
+export type NeutralContentPart = NeutralTextPart | NeutralToolCallPart;
 
 /**
  * A plain text message (the original shape) is still a valid NeutralMessage, so

@@ -1831,4 +1831,24 @@ describe('modelMessages', () => {
       'MCP tool result exceeded limit',
     );
   });
+
+  it('applies maxToolResultBytes to replayed execution-denied reasons', () => {
+    const history: NeutralMessage[] = [
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'call-1',
+            toolName: scheduledTaskTools.list,
+            output: { type: 'execution-denied', reason: 'x'.repeat(11) },
+          },
+        ],
+      },
+    ];
+
+    expect(() => modelMessages(history, invocation, 10)).toThrow(
+      'MCP tool result exceeded limit',
+    );
+  });
 });

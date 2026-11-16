@@ -188,7 +188,7 @@ function toolResultOutputBytes(output: NeutralToolResultOutput): number {
     case 'error-json':
       return Buffer.byteLength(JSON.stringify(output.value) ?? '', 'utf8');
     case 'execution-denied':
-      return 0;
+      return Buffer.byteLength(output.reason ?? '', 'utf8');
   }
 }
 
@@ -208,10 +208,7 @@ function toModelToolResultPart(
   };
 }
 
-function toModelContentPart(
-  part: NeutralContentPart,
-  maxToolResultBytes: number,
-): ModelContentPart {
+function toModelContentPart(part: NeutralContentPart): ModelContentPart {
   switch (part.type) {
     case 'text':
       return { type: 'text', text: part.text };
@@ -222,8 +219,6 @@ function toModelContentPart(
         toolName: part.toolName,
         input: part.input,
       };
-    case 'tool-result':
-      return toModelToolResultPart(part, maxToolResultBytes);
   }
 }
 
@@ -241,9 +236,7 @@ function toModelMessage(
         content:
           typeof message.content === 'string'
             ? message.content
-            : message.content.map((part) =>
-                toModelContentPart(part, maxToolResultBytes),
-              ),
+            : message.content.map((part) => toModelContentPart(part)),
       };
     case 'tool':
       return {
@@ -303,8 +296,6 @@ function toNeutralContentPart(
         toolName: part.toolName,
         input: part.input,
       };
-    case 'tool-result':
-      return toNeutralToolResultPart(part);
     default:
       return undefined;
   }
