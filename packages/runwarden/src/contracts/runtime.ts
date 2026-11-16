@@ -1,3 +1,5 @@
+import type { JSONValue } from 'ai';
+
 import type { AgentRuntimeError } from './errors.js';
 
 export interface InvocationInput {
@@ -16,6 +18,7 @@ export interface InvocationResult {
   invocationId: string;
   runId: string;
   text: string;
+  messages: NeutralMessage[];
   provider?: string;
   model?: string;
 }
@@ -49,10 +52,45 @@ export type InvocationSettledListener = (
   invocation: InvocationRecord,
 ) => void | Promise<void>;
 
-export interface NeutralMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+export interface NeutralTextPart {
+  type: 'text';
+  text: string;
 }
+
+export interface NeutralToolCallPart {
+  type: 'tool-call';
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+}
+
+export type NeutralToolResultOutput =
+  | { type: 'text'; value: string }
+  | { type: 'json'; value: JSONValue }
+  | { type: 'error-text'; value: string }
+  | { type: 'error-json'; value: JSONValue }
+  | { type: 'execution-denied'; reason?: string };
+
+export interface NeutralToolResultPart {
+  type: 'tool-result';
+  toolCallId: string;
+  toolName: string;
+  output: NeutralToolResultOutput;
+}
+
+export type NeutralContentPart =
+  | NeutralTextPart
+  | NeutralToolCallPart
+  | NeutralToolResultPart;
+
+/**
+ * A plain text message (the original shape) is still a valid NeutralMessage, so
+ * existing history loaders and callers compile and behave unchanged.
+ */
+export type NeutralMessage =
+  | { role: 'user' | 'system'; content: string }
+  | { role: 'assistant'; content: string | readonly NeutralContentPart[] }
+  | { role: 'tool'; content: readonly NeutralToolResultPart[] };
 
 export type RuntimeInvocationInput = InvocationInput & {
   invocationId: string;
