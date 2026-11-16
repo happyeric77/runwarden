@@ -100,26 +100,26 @@ function hasInvalidUsage(usage: LanguageModelUsage | undefined): boolean {
 }
 
 function tokenCounts(usage: LanguageModelUsage | undefined): UsageTokenCounts {
-  if (!usage || hasInvalidUsage(usage)) return { ...EMPTY_TOKENS };
-  const cacheReadTokens = metric(usage.inputTokenDetails.cacheReadTokens);
-  const cacheWriteTokens = metric(usage.inputTokenDetails.cacheWriteTokens);
-  const reasoningTokens = metric(usage.outputTokenDetails.reasoningTokens);
+  if (!usage) return { ...EMPTY_TOKENS };
+  const cacheReadTokens =
+    validMetric(usage.inputTokenDetails.cacheReadTokens) ?? 0;
+  const cacheWriteTokens =
+    validMetric(usage.inputTokenDetails.cacheWriteTokens) ?? 0;
+  const reasoningTokens =
+    validMetric(usage.outputTokenDetails.reasoningTokens) ?? 0;
+  const inputTotalValue = validMetric(usage.inputTokens);
+  const outputTotalValue = validMetric(usage.outputTokens);
   return {
     inputTokens:
       validMetric(usage.inputTokenDetails.noCacheTokens) ??
-      (validMetric(usage.inputTokens) === undefined
+      (inputTotalValue === undefined
         ? 0
-        : Math.max(
-            validMetric(usage.inputTokens)! -
-              cacheReadTokens -
-              cacheWriteTokens,
-            0,
-          )),
+        : Math.max(inputTotalValue - cacheReadTokens - cacheWriteTokens, 0)),
     outputTokens:
       validMetric(usage.outputTokenDetails.textTokens) ??
-      (validMetric(usage.outputTokens) === undefined
+      (outputTotalValue === undefined
         ? 0
-        : Math.max(validMetric(usage.outputTokens)! - reasoningTokens, 0)),
+        : Math.max(outputTotalValue - reasoningTokens, 0)),
     cacheReadTokens,
     cacheWriteTokens,
     reasoningTokens,
@@ -246,28 +246,30 @@ function priceStep(
   }
 }
 
-export function buildInvocationUsage(
-  sources: readonly UsageStepSource[],
+export function buildUsageStep(
+  source: UsageStepSource,
   pricing?: UsagePricingOptions,
-): InvocationUsage {
-  const steps: UsageStep[] = sources.map((source) => {
-    const usageKnown =
-      hasUsage(source.usage) &&
-      !hasInvalidUsage(source.usage) &&
-      inputTotal(source.usage) !== undefined &&
-      outputTotal(source.usage) !== undefined;
-    const tokens = tokenCounts(source.usage);
-    const costUsd = usageKnown ? priceStep(source, pricing) : undefined;
-    return {
-      ...tokens,
-      ...(source.provider ? { provider: source.provider } : {}),
-      model: source.model,
-      usageKnown,
-      ...(costUsd !== undefined ? { costUsd } : {}),
-      costKnown: costUsd !== undefined,
-    };
-  });
+): UsageStep {
+  const usageKnown =
+    hasUsage(source.usage) &&
+    !hasInvalidUsage(source.usage) &&
+    inputTotal(source.usage) !== undefined &&
+    outputTotal(source.usage) !== undefined;
+  const tokens = tokenCounts(source.usage);
+  const costUsd = usageKnown ? priceStep(source, pricing) : undefined;
+  return {
+    ...tokens,
+    ...(source.provider ? { provider: source.provider } : {}),
+    model: source.model,
+    usageKnown,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    costKnown: costUsd !== undefined,
+  };
+}
 
+export function aggregateUsageSteps(
+  steps: readonly UsageStep[],
+): InvocationUsage {
   const knownCosts = steps.flatMap((step) =>
     step.costUsd === undefined ? [] : [step.costUsd],
   );
@@ -289,6 +291,15 @@ export function buildInvocationUsage(
       tokensIncomplete ||
       steps.some((step) => !step.costKnown) ||
       (knownCosts.length > 0 && costUsd === undefined),
-    steps,
+    steps: [...steps],
   };
+}
+
+export function buildInvocationUsage(
+  sources: readonly UsageStepSource[],
+  pricing?: UsagePricingOptions,
+): InvocationUsage {
+  return aggregateUsageSteps(
+    sources.map((source) => buildUsageStep(source, pricing)),
+  );
 }

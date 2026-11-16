@@ -29,6 +29,7 @@ import { defineRuntime, RUNTIME_INTERNALS } from '../define-runtime.js';
 import { FakeAgentRuntime } from '../fake-runtime.js';
 import { emptyInvocationUsage } from '../runtime/usage.js';
 import { runWorker } from './run-worker.js';
+import { fakeMcpClient, finishStep } from './test-helpers.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -399,6 +400,112 @@ describe('runWorker', () => {
     },
   );
 
+  it('preserves a budget stop and its usage when audit persistence fails', async () => {
+    await handle.pool.query(
+      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+    );
+    let listener: ((decision: PolicyDecision) => void) | undefined;
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-audit-budget',
+      prompt: 'budget',
+      maxAttempts: 3,
+    });
+    const usage = {
+      ...emptyInvocationUsage(),
+      inputTokens: 6,
+      outputTokens: 5,
+      costIncomplete: true,
+      steps: [
+        {
+          provider: 'mock-provider',
+          model: 'mock-model',
+          inputTokens: 6,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          usageKnown: true,
+          costKnown: false,
+        },
+      ],
+    };
+    const worker = runWorker({
+      db: handle,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+      runtime: {
+        [RUNTIME_INTERNALS]: {
+          onPolicyDecision(callback) {
+            listener = callback;
+            return () => {
+              listener = undefined;
+            };
+          },
+        },
+        engine: {
+          async invoke(input) {
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'warning',
+              detail: { limitKind: 'tokens', accumulated: 6, limit: 10 },
+            });
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'exceeded',
+              detail: { limitKind: 'tokens', accumulated: 11, limit: 10 },
+            });
+            throw new AgentRuntimeError(
+              'budget',
+              'Invocation budget exceeded',
+              {
+                code: 'budget_exceeded',
+                limits: [
+                  {
+                    limitKind: 'tokens',
+                    accumulated: 11,
+                    limit: 10,
+                    stepNumber: 1,
+                    completeness: 'complete',
+                  },
+                ],
+              },
+              { usage },
+            );
+          },
+        },
+      },
+    });
+    try {
+      await waitFor(
+        async () =>
+          (await getInvocationRowById(handle.db, invocationId))?.status ===
+          'failed',
+      );
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row?.lastErrorCode).toBe('budget_exceeded');
+      expect(row?.attemptCount).toBe(1);
+      expect(row?.inputTokens).toBe(6);
+      expect(row?.outputTokens).toBe(5);
+      expect(row?.usageSteps).toEqual(usage.steps);
+      const decisions = await handle.pool.query(
+        'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+        [invocationId],
+      );
+      expect(decisions.rows[0].count).toBe(0);
+    } finally {
+      await worker.stop();
+      await handle.pool.query(
+        'drop trigger reject_audit on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.reject_audit()');
+    }
+  });
+
   it('discards a late result after heartbeat reports lost ownership', async () => {
     const { invocationId } = await enqueueInvocation(handle.db, {
       scope: 'scope-lost',
@@ -709,16 +816,7 @@ describe('durable defineRuntime', () => {
   it('persists usage totals and per-step detail for a durable invocation', async () => {
     const listResult =
       '[{"type":"text","text":"1: booking one, 2: booking two"}]';
-    const fakeMcpClient: McpToolClient = {
-      async open() {
-        return {
-          async callTool() {
-            return listResult;
-          },
-          async close() {},
-        };
-      },
-    };
+    const mcp = fakeMcpClient(listResult);
     const stepUsage = {
       inputTokens: {
         total: 10,
@@ -732,29 +830,29 @@ describe('durable defineRuntime', () => {
       modelId: 'mock-model',
       doGenerate: async (options) => {
         const promptText = JSON.stringify(options.prompt);
-        const finish = (content: unknown[]) => ({
-          content: content as never,
-          finishReason: { unified: 'stop', raw: 'stop' } as const,
-          usage: stepUsage,
-          warnings: [],
-        });
         if (promptText.includes('1: booking one')) {
-          return finish([{ type: 'text', text: 'Found two bookings.' }]);
+          return finishStep(
+            [{ type: 'text', text: 'Found two bookings.' }],
+            stepUsage,
+          );
         }
-        return finish([
-          {
-            type: 'tool-call',
-            toolCallId: 'usage-durable',
-            toolName: 'tasks__list_scheduled',
-            input: JSON.stringify({ query_mode: 'upcoming' }),
-          },
-        ]);
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'usage-durable',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          stepUsage,
+        );
       },
     });
     const runtime = defineRuntime({
       db: handle,
       model,
-      mcpClient: fakeMcpClient,
+      mcpClient: mcp.client,
       tools: [
         {
           name: 'tasks__list_scheduled',
@@ -820,6 +918,127 @@ describe('durable defineRuntime', () => {
     }
   });
 
+  it('stops a durable invocation on a token budget and persists usage without retry', async () => {
+    const mcp = fakeMcpClient(
+      '[{"type":"text","text":"1: booking one, 2: booking two"}]',
+    );
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        modelCalls += 1;
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('1: booking one')) {
+          return finishStep([{ type: 'text', text: 'Should not be reached.' }]);
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-durable',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10 } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      let caught: unknown;
+      try {
+        await runtime.invoke(
+          {
+            scope: 'scope-durable-budget',
+            prompt: 'List my tasks',
+            maxAttempts: 3,
+          },
+          { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(AgentRuntimeError);
+      const error = caught as AgentRuntimeError;
+      expect(error.kind).toBe('budget');
+      expect(error.diagnostics).toMatchObject({
+        code: 'budget_exceeded',
+        invocationId: expect.any(String),
+        runId: expect.any(String),
+      });
+      expect(error.usage).toMatchObject({
+        inputTokens: 6,
+        outputTokens: 5,
+        costIncomplete: true,
+      });
+      expect(error.usage?.steps).toHaveLength(1);
+
+      const invocationId = error.diagnostics.invocationId as string;
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row).toMatchObject({
+        status: 'failed',
+        attemptCount: 1,
+        inputTokens: 6,
+        outputTokens: 5,
+        lastErrorCode: 'budget_exceeded',
+      });
+      expect(row?.usageSteps).toEqual(error.usage?.steps);
+      expect(modelCalls).toBe(1);
+      expect(mcp.calls()).toBe(1);
+
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+         where invocation_id = $1 and rule = 'budget'
+         order by id`,
+        [invocationId],
+      );
+      expect(decisions.rows.map((decision) => decision.decision)).toEqual(
+        expect.arrayContaining(['warning', 'exceeded']),
+      );
+
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 10,
+          waitTimeoutMs: 1_000,
+        }),
+      ).rejects.toMatchObject({
+        kind: 'budget',
+        diagnostics: {
+          code: 'budget_exceeded',
+          invocationId,
+        },
+        usage: error.usage,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it('completes successfully when provider usage contains invalid token counts', async () => {
     const model = new MockLanguageModelV4({
       modelId: 'invalid-usage-model',
@@ -859,7 +1078,7 @@ describe('durable defineRuntime', () => {
       expect(result.text).toBe('Still completed.');
       expect(result.usage).toMatchObject({
         inputTokens: 0,
-        outputTokens: 0,
+        outputTokens: 2,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
         reasoningTokens: 0,
@@ -871,7 +1090,7 @@ describe('durable defineRuntime', () => {
       expect(row).toMatchObject({
         status: 'succeeded',
         inputTokens: 0,
-        outputTokens: 0,
+        outputTokens: 2,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
         reasoningTokens: 0,

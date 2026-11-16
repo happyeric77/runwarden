@@ -50,10 +50,16 @@ export type {
 } from './contracts/runtime.js';
 
 export type {
+  BudgetCompleteness,
+  BudgetExceededLimit,
+  BudgetLimitKind,
+  BudgetWarning,
+  BudgetWarningEvent,
   McpServerConfig,
   PolicyDecision,
   PolicyDecisionKind,
   PolicyRule,
+  RuntimeBudgetPolicy,
   RuntimePolicies,
   ToolDefinition,
 } from './contracts/policy.js';

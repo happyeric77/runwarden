@@ -210,6 +210,44 @@ policies: {
 The predicate also receives `scope`. Return `true` to require approval; a
 thrown error fails the invocation.
 
+## Budgets
+
+Add a per-execution budget when you want a runaway invocation to stop:
+
+```ts
+const runtime = defineRuntime({
+  // ...
+  policies: {
+    budget: {
+      maxCostUsd: 0.25,
+      maxTokens: 50_000,
+      onExceeded: 'stop', // or 'log'
+    },
+  },
+  onBudgetWarning: (warning) => {
+    console.warn('budget warning', warning);
+  },
+});
+```
+
+Budgets are checked after each completed step. This is a circuit breaker, not
+an exact gate: the step that crosses a limit finishes, including its tool side
+effects, and only the next model call is prevented. One call can therefore
+overshoot the limit. A crossing on the final text step is recorded but the
+answer is still returned.
+
+`maxTokens` counts input, cache read, cache write, output, and reasoning
+tokens. Known token counts are a lower bound when a provider omits usage.
+`maxCostUsd` is enforced only when every step's cost is known and accounting is
+complete; unknown cost is recorded as an incomplete decision and never treated
+as zero. Set `onExceeded: 'log'` to record crossings without stopping.
+
+Budgets emit an 80% warning and a 100% crossing decision. `onBudgetWarning` fires
+once per limit per execution, and observer errors do not affect the invocation.
+A `stop` outcome throws an `AgentRuntimeError` with kind `budget` and code
+`budget_exceeded`, persists the usage accrued through the crossing step, and is
+not retried.
+
 ## The full quickstart (from the repo)
 
 ### Requirements
