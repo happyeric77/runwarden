@@ -110,6 +110,9 @@ export class PolicyEngine {
     tokens: false,
     costUsd: false,
   };
+  private readonly budgetExceededDetails: Partial<
+    Record<BudgetLimitKind, BudgetExceededLimit>
+  > = {};
   private readonly budgetIncomplete: Record<BudgetLimitKind, boolean> = {
     tokens: false,
     costUsd: false,
@@ -334,7 +337,6 @@ export class PolicyEngine {
     const terminalOnThisStep =
       existingTerminal?.diagnostics.code ??
       (canContinue ? undefined : 'final_step');
-    const exceeded: BudgetExceededLimit[] = [];
 
     const tokenTotal = BUDGET_TOKEN_FIELDS.reduce(
       (total, key) => total + BigInt(usage[key]),
@@ -393,7 +395,7 @@ export class PolicyEngine {
             stepNumber,
             completeness: tokenCompleteness,
           };
-          exceeded.push(detail);
+          this.budgetExceededDetails.tokens = detail;
           this.record({
             rule: 'budget',
             decision: 'exceeded',
@@ -446,7 +448,7 @@ export class PolicyEngine {
               stepNumber,
               completeness: 'complete',
             };
-            exceeded.push(detail);
+            this.budgetExceededDetails.costUsd = detail;
             this.record({
               rule: 'budget',
               decision: 'exceeded',
@@ -478,6 +480,9 @@ export class PolicyEngine {
       }
     }
 
+    const exceeded = Object.values(this.budgetExceededDetails).filter(
+      (detail): detail is BudgetExceededLimit => detail !== undefined,
+    );
     if (
       exceeded.length > 0 &&
       budget.onExceeded === 'stop' &&

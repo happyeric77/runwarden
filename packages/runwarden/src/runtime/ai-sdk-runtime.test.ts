@@ -1205,6 +1205,100 @@ describe('AiSdkNativeRuntime', () => {
     });
   });
 
+  it('stops when a text-only correction response reaches the budget', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('correction-a', directoryTools.get, { recordId: 1 }),
+            toolCall('correction-b', directoryTools.get, { recordId: 2 }),
+          ),
+          1,
+          0,
+        ),
+        metered(textStep('Still correcting'), 0, 9),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          budget: { maxTokens: 10 },
+          correctionBudget: 2,
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: { code: 'budget_exceeded' },
+      usage: { inputTokens: 1, outputTokens: 9 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
+    expect(subject.callTool).not.toHaveBeenCalled();
+    expect(
+      decisions
+        .filter((decision) => decision.rule === 'budget')
+        .map((decision) => decision.decision),
+    ).toEqual(['warning', 'exceeded']);
+    expect(decisions.at(-1)?.detail).not.toHaveProperty('terminal');
+  });
+
+  it('stops from valid input tokens when output usage is invalid', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('invalid-output', directoryTools.get, { recordId: 7 }),
+          ),
+          20,
+          Number.NaN,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10 } } },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_exceeded',
+        limits: [
+          {
+            limitKind: 'tokens',
+            accumulated: 20,
+            limit: 10,
+            stepNumber: 1,
+            completeness: 'lower_bound',
+          },
+        ],
+      },
+      usage: {
+        inputTokens: 20,
+        outputTokens: 0,
+        costIncomplete: true,
+        steps: [
+          {
+            inputTokens: 20,
+            outputTokens: 0,
+            usageKnown: false,
+            costKnown: false,
+          },
+        ],
+      },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.callTool).toHaveBeenCalledTimes(1);
+  });
+
   it('stops before the next provider call when a tool step reaches the token budget', async () => {
     const decisions: PolicyDecision[] = [];
     const warnings: BudgetWarning[] = [];

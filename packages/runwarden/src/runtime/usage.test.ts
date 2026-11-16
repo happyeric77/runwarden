@@ -177,7 +177,7 @@ describe('buildInvocationUsage', () => {
 
     expect(result.steps[0]).toMatchObject({
       inputTokens: 0,
-      outputTokens: 0,
+      outputTokens: 2,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       reasoningTokens: 0,

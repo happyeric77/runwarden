@@ -471,7 +471,8 @@ export class AiSdkNativeRuntime implements AgentRuntime {
           policy.evaluateBudget(
             aggregateUsageSteps(usageSteps),
             usageSteps.length,
-            step.toolCalls.length > 0,
+            step.toolCalls.length > 0 ||
+              policy.correctionInstruction() !== undefined,
           );
         },
         stopWhen: () => policy.terminalError != null,
