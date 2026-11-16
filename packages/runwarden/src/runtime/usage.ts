@@ -246,28 +246,30 @@ function priceStep(
   }
 }
 
-export function buildInvocationUsage(
-  sources: readonly UsageStepSource[],
+export function buildUsageStep(
+  source: UsageStepSource,
   pricing?: UsagePricingOptions,
-): InvocationUsage {
-  const steps: UsageStep[] = sources.map((source) => {
-    const usageKnown =
-      hasUsage(source.usage) &&
-      !hasInvalidUsage(source.usage) &&
-      inputTotal(source.usage) !== undefined &&
-      outputTotal(source.usage) !== undefined;
-    const tokens = tokenCounts(source.usage);
-    const costUsd = usageKnown ? priceStep(source, pricing) : undefined;
-    return {
-      ...tokens,
-      ...(source.provider ? { provider: source.provider } : {}),
-      model: source.model,
-      usageKnown,
-      ...(costUsd !== undefined ? { costUsd } : {}),
-      costKnown: costUsd !== undefined,
-    };
-  });
+): UsageStep {
+  const usageKnown =
+    hasUsage(source.usage) &&
+    !hasInvalidUsage(source.usage) &&
+    inputTotal(source.usage) !== undefined &&
+    outputTotal(source.usage) !== undefined;
+  const tokens = tokenCounts(source.usage);
+  const costUsd = usageKnown ? priceStep(source, pricing) : undefined;
+  return {
+    ...tokens,
+    ...(source.provider ? { provider: source.provider } : {}),
+    model: source.model,
+    usageKnown,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    costKnown: costUsd !== undefined,
+  };
+}
 
+export function aggregateUsageSteps(
+  steps: readonly UsageStep[],
+): InvocationUsage {
   const knownCosts = steps.flatMap((step) =>
     step.costUsd === undefined ? [] : [step.costUsd],
   );
@@ -289,6 +291,15 @@ export function buildInvocationUsage(
       tokensIncomplete ||
       steps.some((step) => !step.costKnown) ||
       (knownCosts.length > 0 && costUsd === undefined),
-    steps,
+    steps: [...steps],
   };
+}
+
+export function buildInvocationUsage(
+  sources: readonly UsageStepSource[],
+  pricing?: UsagePricingOptions,
+): InvocationUsage {
+  return aggregateUsageSteps(
+    sources.map((source) => buildUsageStep(source, pricing)),
+  );
 }

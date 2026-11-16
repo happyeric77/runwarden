@@ -22,7 +22,8 @@ export type PolicyRule =
   | 'allowlist'
   | 'require_approval'
   | 'input_validation'
-  | 'correction_budget';
+  | 'correction_budget'
+  | 'budget';
 
 export type PolicyDecisionKind =
   | 'allow'
@@ -30,7 +31,10 @@ export type PolicyDecisionKind =
   | 'correction_issued'
   | 'approval_requested'
   | 'approved'
-  | 'rejected';
+  | 'rejected'
+  | 'warning'
+  | 'exceeded'
+  | 'incomplete';
 
 export interface PolicyDecision {
   scope: string;
@@ -40,6 +44,40 @@ export interface PolicyDecision {
   decision: PolicyDecisionKind;
   toolName?: string;
   detail?: Record<string, unknown>;
+}
+
+export type BudgetLimitKind = 'costUsd' | 'tokens';
+export type BudgetCompleteness = 'complete' | 'lower_bound';
+
+export interface RuntimeBudgetPolicy {
+  maxCostUsd?: number;
+  maxTokens?: number;
+  onExceeded?: 'stop' | 'log';
+}
+
+export interface BudgetWarning {
+  scope: string;
+  invocationId: string;
+  runId: string;
+  limitKind: BudgetLimitKind;
+  accumulated: number;
+  limit: number;
+  threshold: 0.8;
+  stepNumber: number;
+  completeness: BudgetCompleteness;
+}
+
+export type BudgetWarningEvent = Omit<
+  BudgetWarning,
+  'scope' | 'invocationId' | 'runId'
+>;
+
+export interface BudgetExceededLimit {
+  limitKind: BudgetLimitKind;
+  accumulated: number;
+  limit: number;
+  stepNumber: number;
+  completeness: BudgetCompleteness;
 }
 
 export interface RuntimePolicies {
@@ -52,4 +90,15 @@ export interface RuntimePolicies {
     | string[]
     | ((call: { scope: string; toolName: string; input: unknown }) => boolean);
   maxToolResultBytes?: number;
+  /**
+   * Per-execution usage budget, checked after each completed step.
+   *
+   * Enforcement is a circuit breaker, not a precise gate: the step that crosses
+   * a limit completes (including its tool side effects), and only the next model
+   * call is prevented. A crossing on a final text step is recorded but still
+   * returns the answer. `maxCostUsd` is only enforceable when every step's cost
+   * is known; token limits use known token counts as a lower bound. Budget stops
+   * are final and are not retried.
+   */
+  budget?: RuntimeBudgetPolicy;
 }

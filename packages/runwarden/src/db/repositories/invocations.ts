@@ -318,14 +318,23 @@ export async function markInvocationFailed(
   runId: string,
   error: { code: string; message: string },
   retryDelayMs: number,
+  options: { usage?: InvocationUsage; retryable?: boolean } = {},
 ): Promise<InvocationRow | undefined> {
+  const terminal = options.retryable === false;
   const updated = await db.execute(sql`
     update agent_runtime.invocations
-    set status = (case when attempt_count >= max_attempts then 'failed' else 'pending' end)::agent_runtime.invocation_status,
-        next_attempt_at = now() + (${retryDelayMs} * interval '1 millisecond'),
-        failed_at = case when attempt_count >= max_attempts then now() else failed_at end,
-        completed_at = case when attempt_count >= max_attempts then now() else completed_at end,
-        pending_tool_call = case when attempt_count >= max_attempts then null else pending_tool_call end,
+    set status = (case when ${terminal} or attempt_count >= max_attempts then 'failed' else 'pending' end)::agent_runtime.invocation_status,
+        next_attempt_at = case when ${terminal} or attempt_count >= max_attempts then now() else now() + (${retryDelayMs} * interval '1 millisecond') end,
+        failed_at = case when ${terminal} or attempt_count >= max_attempts then now() else failed_at end,
+        completed_at = case when ${terminal} or attempt_count >= max_attempts then now() else completed_at end,
+        pending_tool_call = case when ${terminal} or attempt_count >= max_attempts then null else pending_tool_call end,
+        input_tokens = ${options.usage?.inputTokens ?? null},
+        output_tokens = ${options.usage?.outputTokens ?? null},
+        cache_read_tokens = ${options.usage?.cacheReadTokens ?? null},
+        cache_write_tokens = ${options.usage?.cacheWriteTokens ?? null},
+        reasoning_tokens = ${options.usage?.reasoningTokens ?? null},
+        cost_usd = ${options.usage?.costUsd ?? null},
+        usage_steps = ${options.usage ? JSON.stringify(options.usage.steps) : null}::jsonb,
         last_error_code = ${error.code},
         last_error_message = ${error.message},
         ${CLEAR_CLAIM},

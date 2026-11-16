@@ -186,7 +186,8 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       auditIds.delete(event.dispatchId);
     });
     try {
-      let result: InvocationResult;
+      let result: InvocationResult | undefined;
+      let invocationError: unknown;
       try {
         result = await options.runtime.engine.invoke({
           ...row.input,
@@ -194,17 +195,36 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           runId: row.activeRunId!,
           approvedToolCall: toPendingToolCall(row.pendingToolCall),
         });
+      } catch (error) {
+        invocationError = error;
       } finally {
         unsubscribe?.();
         unsubscribeAudit?.();
         await Promise.all(auditWrites);
-        if (auditError)
-          throw new AgentRuntimeError(
-            'failure',
-            'Policy audit persistence failed',
-            { code: 'audit_persistence_failed' },
-            { cause: auditError },
-          );
+      }
+      if (auditError) {
+        const budgetError =
+          invocationError === undefined
+            ? undefined
+            : toAgentError(invocationError);
+        if (budgetError && errorCode(budgetError) === 'budget_exceeded') {
+          budgetError.diagnostics.auditFailure =
+            'Policy audit persistence failed';
+          throw budgetError;
+        }
+        throw new AgentRuntimeError(
+          'failure',
+          'Policy audit persistence failed',
+          { code: 'audit_persistence_failed' },
+          { cause: auditError },
+        );
+      }
+      if (invocationError !== undefined) throw invocationError;
+      if (!result) {
+        throw new AgentRuntimeError(
+          'failure',
+          'Native runtime returned no invocation result',
+        );
       }
       if (lease.isLost) return;
       const marked = await markInvocationSucceeded(
@@ -269,6 +289,12 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         row.activeRunId!,
         { code: errorCode(agentError), message: agentError.message },
         retryDelayMs,
+        {
+          ...(agentError.usage ? { usage: agentError.usage } : {}),
+          ...(errorCode(agentError) === 'budget_exceeded'
+            ? { retryable: false }
+            : {}),
+        },
       );
       if (updated?.status === 'failed') {
         await internals?.notifyInvocationSettled?.(toRecord(updated));

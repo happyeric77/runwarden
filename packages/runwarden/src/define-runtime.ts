@@ -4,6 +4,7 @@ import type { LanguageModel } from 'ai';
 
 import { AgentRuntimeError } from './contracts/errors.js';
 import type {
+  BudgetWarning,
   McpServerConfig,
   PolicyDecision,
   RuntimePolicies,
@@ -16,6 +17,7 @@ import type {
   InvocationRecord,
   InvocationResult,
   InvocationSettledListener,
+  InvocationUsage,
   McpToolClient,
   McpToolSession,
   RuntimeMetrics,
@@ -36,6 +38,7 @@ import {
   toPendingToolCall,
   toRecord,
 } from './db/repositories/invocations.js';
+import type { InvocationRow } from './db/schema.js';
 import { NativeMcpClient } from './mcp/native-mcp-client.js';
 import { AiSdkNativeRuntime } from './runtime/ai-sdk-runtime.js';
 import {
@@ -58,6 +61,25 @@ export interface RuntimeInternals {
   generateRunId?: () => string;
 }
 
+function usageFromRow(row: InvocationRow): InvocationUsage {
+  if (!row.usageSteps) {
+    return { ...emptyInvocationUsage(), costIncomplete: true };
+  }
+  return {
+    inputTokens: row.inputTokens ?? 0,
+    outputTokens: row.outputTokens ?? 0,
+    cacheReadTokens: row.cacheReadTokens ?? 0,
+    cacheWriteTokens: row.cacheWriteTokens ?? 0,
+    reasoningTokens: row.reasoningTokens ?? 0,
+    ...(row.costUsd === null ? {} : { costUsd: row.costUsd }),
+    costIncomplete:
+      row.usageSteps.some((step) => !step.costKnown) ||
+      (row.usageSteps.some((step) => step.costKnown) && row.costUsd === null) ||
+      usageStepsOverflow(row.usageSteps),
+    steps: row.usageSteps,
+  };
+}
+
 export interface DefineRuntimeOptions {
   db?: DatabaseHandle;
   model?: LanguageModel;
@@ -71,6 +93,7 @@ export interface DefineRuntimeOptions {
   pricing?: UsagePricingOptions;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  onBudgetWarning?: (warning: BudgetWarning) => void;
   onToolCallAudit?: ToolCallAuditSink;
   onInvocationSettled?: InvocationSettledListener;
   generateRunId?: () => string;
@@ -206,6 +229,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
       for (const listener of decisionListeners) listener(decision);
       options.onPolicyDecision?.(decision);
     },
+    onBudgetWarning: options.onBudgetWarning,
     onToolCallAudit: async (event) => {
       // Persistence listeners run first; their failure fails the call.
       for (const listener of auditListeners) await listener(event);
@@ -251,22 +275,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           runId: row.activeRunId!,
           text: row.resultText ?? '',
           messages: row.resultMessages ?? [],
-          usage: row.usageSteps
-            ? {
-                inputTokens: row.inputTokens ?? 0,
-                outputTokens: row.outputTokens ?? 0,
-                cacheReadTokens: row.cacheReadTokens ?? 0,
-                cacheWriteTokens: row.cacheWriteTokens ?? 0,
-                reasoningTokens: row.reasoningTokens ?? 0,
-                ...(row.costUsd === null ? {} : { costUsd: row.costUsd }),
-                costIncomplete:
-                  row.usageSteps.some((step) => !step.costKnown) ||
-                  (row.usageSteps.some((step) => step.costKnown) &&
-                    row.costUsd === null) ||
-                  usageStepsOverflow(row.usageSteps),
-                steps: row.usageSteps,
-              }
-            : { ...emptyInvocationUsage(), costIncomplete: true },
+          usage: usageFromRow(row),
           provider: row.provider ?? undefined,
           model: row.model ?? undefined,
         };
@@ -284,6 +293,18 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
         );
       }
       if (row.status === 'failed' || row.status === 'cancelled') {
+        if (row.lastErrorCode === 'budget_exceeded') {
+          throw new AgentRuntimeError(
+            'budget',
+            row.lastErrorMessage ?? 'Invocation budget exceeded',
+            {
+              code: 'budget_exceeded',
+              invocationId,
+              runId: row.activeRunId!,
+            },
+            { usage: usageFromRow(row) },
+          );
+        }
         throw new AgentRuntimeError(
           'failure',
           row.lastErrorMessage ?? `Invocation ${row.status}`,

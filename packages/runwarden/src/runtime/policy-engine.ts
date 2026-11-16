@@ -1,7 +1,15 @@
 import { AgentRuntimeError } from '../contracts/errors.js';
-import type { PolicyDecision, RuntimePolicies } from '../contracts/policy.js';
-import type { PendingToolCall } from '../contracts/runtime.js';
+import type {
+  BudgetCompleteness,
+  BudgetExceededLimit,
+  BudgetLimitKind,
+  BudgetWarningEvent,
+  PolicyDecision,
+  RuntimePolicies,
+} from '../contracts/policy.js';
+import type { InvocationUsage, PendingToolCall } from '../contracts/runtime.js';
 import { canonicalJson } from './canonical-json.js';
+import { usageStepsOverflow } from './usage.js';
 
 const TOOL_PROPOSAL_CORRECTION =
   'Return exactly one tool call for the next required step. Wait for its result before proposing another tool.';
@@ -21,10 +29,57 @@ interface PendingCorrection {
 
 type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
 
+interface ValidatedBudget {
+  maxCostUsd?: number;
+  maxTokens?: number;
+  onExceeded: 'stop' | 'log';
+}
+
 interface PolicyEngineHooks {
   onDecision?: (decision: PolicyRuling) => void;
+  onBudgetWarning?: (warning: BudgetWarningEvent) => void;
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
   approvedToolCall?: PendingToolCall;
+}
+
+const BUDGET_TOKEN_FIELDS = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+  'reasoningTokens',
+] as const;
+
+function validateBudget(
+  budget: RuntimePolicies['budget'],
+): ValidatedBudget | undefined {
+  if (!budget) return undefined;
+  const onExceeded = budget.onExceeded ?? 'stop';
+  if (onExceeded !== 'stop' && onExceeded !== 'log') {
+    throw new Error("budget.onExceeded must be 'stop' or 'log'");
+  }
+  if (budget.maxCostUsd === undefined && budget.maxTokens === undefined) {
+    throw new Error('budget requires maxCostUsd or maxTokens');
+  }
+  if (
+    budget.maxCostUsd !== undefined &&
+    (!Number.isFinite(budget.maxCostUsd) || budget.maxCostUsd <= 0)
+  ) {
+    throw new Error('budget.maxCostUsd must be a positive finite number');
+  }
+  if (
+    budget.maxTokens !== undefined &&
+    (!Number.isSafeInteger(budget.maxTokens) || budget.maxTokens <= 0)
+  ) {
+    throw new Error('budget.maxTokens must be a positive integer');
+  }
+  return {
+    ...(budget.maxCostUsd !== undefined
+      ? { maxCostUsd: budget.maxCostUsd }
+      : {}),
+    ...(budget.maxTokens !== undefined ? { maxTokens: budget.maxTokens } : {}),
+    onExceeded,
+  };
 }
 
 function isSameToolCall(
@@ -46,6 +101,19 @@ export class PolicyEngine {
   private readonly exactlyOne: boolean;
   private readonly correctionBudget: number;
   private readonly maxToolCallsPerInvocation: number;
+  private readonly budget?: ValidatedBudget;
+  private readonly budgetWarned: Record<BudgetLimitKind, boolean> = {
+    tokens: false,
+    costUsd: false,
+  };
+  private readonly budgetExceeded: Record<BudgetLimitKind, boolean> = {
+    tokens: false,
+    costUsd: false,
+  };
+  private readonly budgetIncomplete: Record<BudgetLimitKind, boolean> = {
+    tokens: false,
+    costUsd: false,
+  };
   private pendingCorrection?: PendingCorrection;
   private terminal?: AgentRuntimeError;
   private approvedToolCalls = 0;
@@ -59,6 +127,7 @@ export class PolicyEngine {
     this.exactlyOne = policies.exactlyOneToolCallPerStep ?? true;
     this.correctionBudget = policies.correctionBudget ?? 1;
     this.maxToolCallsPerInvocation = policies.maxToolCallsPerInvocation ?? 8;
+    this.budget = validateBudget(policies.budget);
     this.approvedToolCall = hooks.approvedToolCall;
     for (const [name, value] of [
       ['correctionBudget', this.correctionBudget],
@@ -247,6 +316,189 @@ export class PolicyEngine {
     }
 
     this.handleViolation(toolCalls, 0);
+  }
+
+  evaluateBudget(
+    usage: InvocationUsage,
+    stepNumber: number,
+    canContinue: boolean,
+  ): void {
+    const budget = this.budget;
+    if (!budget) return;
+
+    const existingTerminal =
+      this.terminal &&
+      this.terminal.diagnostics.code !== 'audit_persistence_failed'
+        ? this.terminal
+        : undefined;
+    const terminalOnThisStep =
+      existingTerminal?.diagnostics.code ??
+      (canContinue ? undefined : 'final_step');
+    const exceeded: BudgetExceededLimit[] = [];
+
+    const tokenTotal = BUDGET_TOKEN_FIELDS.reduce(
+      (total, key) => total + BigInt(usage[key]),
+      0n,
+    );
+    const accumulatedTokens =
+      tokenTotal > BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number.MAX_SAFE_INTEGER
+        : Number(tokenTotal);
+    const tokenCompleteness: BudgetCompleteness =
+      usage.steps.every((step) => step.usageKnown) &&
+      !usageStepsOverflow(usage.steps)
+        ? 'complete'
+        : 'lower_bound';
+
+    const warn = (
+      limitKind: BudgetLimitKind,
+      accumulated: number,
+      limit: number,
+      completeness: BudgetCompleteness,
+    ): void => {
+      if (this.budgetWarned[limitKind]) return;
+      this.budgetWarned[limitKind] = true;
+      const event: BudgetWarningEvent = {
+        limitKind,
+        accumulated,
+        limit,
+        threshold: 0.8,
+        stepNumber,
+        completeness,
+      };
+      this.record({
+        rule: 'budget',
+        decision: 'warning',
+        detail: { event: 'warning', ...event, onExceeded: budget.onExceeded },
+      });
+      try {
+        this.hooks.onBudgetWarning?.(event);
+      } catch {
+        // Budget warnings are observational and must not affect execution.
+      }
+    };
+
+    if (budget.maxTokens !== undefined) {
+      const limit = BigInt(budget.maxTokens);
+      if (tokenTotal * 5n >= limit * 4n) {
+        warn('tokens', accumulatedTokens, budget.maxTokens, tokenCompleteness);
+      }
+      if (tokenTotal >= limit) {
+        if (!this.budgetExceeded.tokens) {
+          this.budgetExceeded.tokens = true;
+          const detail: BudgetExceededLimit = {
+            limitKind: 'tokens',
+            accumulated: accumulatedTokens,
+            limit: budget.maxTokens,
+            stepNumber,
+            completeness: tokenCompleteness,
+          };
+          exceeded.push(detail);
+          this.record({
+            rule: 'budget',
+            decision: 'exceeded',
+            detail: {
+              event: 'exceeded',
+              ...detail,
+              ...(terminalOnThisStep ? { terminal: terminalOnThisStep } : {}),
+            },
+          });
+        }
+      } else if (
+        tokenCompleteness === 'lower_bound' &&
+        !this.budgetIncomplete.tokens
+      ) {
+        this.budgetIncomplete.tokens = true;
+        this.record({
+          rule: 'budget',
+          decision: 'incomplete',
+          detail: {
+            event: 'incomplete',
+            limitKind: 'tokens',
+            accumulated: accumulatedTokens,
+            limit: budget.maxTokens,
+            stepNumber,
+            onExceeded: budget.onExceeded,
+            completeness: tokenCompleteness,
+            reason: 'usage_incomplete',
+          },
+        });
+      }
+    }
+
+    if (budget.maxCostUsd !== undefined) {
+      const cost = usage.costUsd;
+      if (
+        cost !== undefined &&
+        Number.isFinite(cost) &&
+        !usage.costIncomplete
+      ) {
+        if (cost >= budget.maxCostUsd * 0.8) {
+          warn('costUsd', cost, budget.maxCostUsd, 'complete');
+        }
+        if (cost >= budget.maxCostUsd) {
+          if (!this.budgetExceeded.costUsd) {
+            this.budgetExceeded.costUsd = true;
+            const detail: BudgetExceededLimit = {
+              limitKind: 'costUsd',
+              accumulated: cost,
+              limit: budget.maxCostUsd,
+              stepNumber,
+              completeness: 'complete',
+            };
+            exceeded.push(detail);
+            this.record({
+              rule: 'budget',
+              decision: 'exceeded',
+              detail: {
+                event: 'exceeded',
+                ...detail,
+                ...(terminalOnThisStep ? { terminal: terminalOnThisStep } : {}),
+              },
+            });
+          }
+        }
+      } else if (!this.budgetIncomplete.costUsd) {
+        this.budgetIncomplete.costUsd = true;
+        this.record({
+          rule: 'budget',
+          decision: 'incomplete',
+          detail: {
+            event: 'incomplete',
+            limitKind: 'costUsd',
+            accumulated: null,
+            knownCostUsd: cost ?? null,
+            limit: budget.maxCostUsd,
+            stepNumber,
+            onExceeded: budget.onExceeded,
+            completeness: 'lower_bound',
+            reason: 'cost_unknown',
+          },
+        });
+      }
+    }
+
+    if (
+      exceeded.length > 0 &&
+      budget.onExceeded === 'stop' &&
+      canContinue &&
+      !existingTerminal
+    ) {
+      const auditFailure =
+        this.terminal?.diagnostics.code === 'audit_persistence_failed'
+          ? this.terminal.message
+          : undefined;
+      this.terminal = new AgentRuntimeError(
+        'budget',
+        'Invocation budget exceeded',
+        {
+          code: 'budget_exceeded',
+          limits: exceeded,
+          ...(auditFailure ? { auditFailure } : {}),
+        },
+        { usage },
+      );
+    }
   }
 
   private handleViolation(
