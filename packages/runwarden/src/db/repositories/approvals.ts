@@ -152,6 +152,10 @@ export async function resolveInvocationApproval(
       } as const;
     }
 
+    if (options.requestId !== undefined) {
+      return { outcome: 'stale_request', row };
+    }
+
     if (options.grant !== undefined) {
       throw new AgentRuntimeError(
         'failure',

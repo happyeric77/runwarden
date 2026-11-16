@@ -1041,6 +1041,78 @@ describe('invocation repositories', () => {
     ).resolves.toMatchObject({ outcome: 'resolved' });
   });
 
+  it('rejects a stale budget request when a newer tool park is pending', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-cross-kind',
+      'cross-kind-worker-1',
+    );
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 20 }, requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'resolved' });
+
+    const resumed = await claimSpecific(invocationId, 'cross-kind-worker-2');
+    expect(resumed.activeRunId).not.toBe(request.requestId);
+
+    const toolCall = { toolName: 'gated', input: { amount: 1 } };
+    await markInvocationAwaitingApproval(
+      handle.db,
+      resumed.id,
+      'cross-kind-worker-2',
+      resumed.activeRunId!,
+      { kind: 'tool', toolCall },
+    );
+
+    const decisionCount = (
+      await handle.pool.query(
+        'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+        [invocationId],
+      )
+    ).rows[0].count;
+
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'rejected',
+        { requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { requestId: request.requestId, grant: { maxTokens: 20 } },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+
+    await expect(
+      getInvocationRowById(handle.db, invocationId),
+    ).resolves.toMatchObject({
+      status: 'awaiting_approval',
+      pendingToolCall: toolCall,
+      pendingBudgetRequest: null,
+      budgetGrants: { maxTokens: 20 },
+    });
+    expect(
+      (
+        await handle.pool.query(
+          'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        )
+      ).rows[0].count,
+    ).toBe(decisionCount);
+  });
+
   it('rejects invalid grants without changing state', async () => {
     const configured = { maxTokens: 10 };
     const { invocationId, request } = await parkBudget(
