@@ -35,6 +35,7 @@ import {
 import {
   enqueueInvocation,
   getInvocationRowById,
+  toBudgetRequest,
   toPendingToolCall,
   toRecord,
 } from './db/repositories/invocations.js';
@@ -282,6 +283,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
       }
       if (row.status === 'awaiting_approval') {
         const pending = toPendingToolCall(row.pendingToolCall);
+        const budgetRequest = toBudgetRequest(row.pendingBudgetRequest);
         throw new AgentRuntimeError(
           'failure',
           `Invocation ${invocationId} is awaiting approval`,
@@ -289,6 +291,7 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
             code: 'approval_required',
             invocationId,
             ...(pending ? { toolName: pending.toolName } : {}),
+            ...(budgetRequest ? { budgetRequest } : {}),
           },
         );
       }
@@ -341,12 +344,25 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     opts?: ApprovalActionOptions,
   ): Promise<InvocationRecord> {
     if (!db) throw dbRequired(`${resolution} resolution`);
-    const result = await resolveInvocationApproval(db.db, id, resolution, opts);
+    const result = await resolveInvocationApproval(
+      db.db,
+      id,
+      resolution,
+      opts,
+      options.policies?.budget,
+    );
     if (result.outcome === 'not_found') {
       throw new AgentRuntimeError('failure', `Invocation ${id} was not found`, {
         code: 'invocation_not_found',
         invocationId: id,
       });
+    }
+    if (result.outcome === 'stale_request') {
+      throw new AgentRuntimeError(
+        'failure',
+        `Invocation ${id} has a newer pending approval request`,
+        { code: 'approval_request_stale', invocationId: id },
+      );
     }
     if (result.outcome === 'not_awaiting') {
       throw new AgentRuntimeError(

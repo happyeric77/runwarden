@@ -398,6 +398,8 @@ export class AiSdkNativeRuntime implements AgentRuntime {
       },
       correctionForInvalidCall: (call) => this.correctionFor(call),
       approvedToolCall: input.approvedToolCall,
+      budgetGrants: input.budgetGrants,
+      budgetParkable: input.budgetParkable,
     });
 
     let approvalError: { error: unknown } | undefined;

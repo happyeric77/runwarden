@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 
+import type { BudgetGrant } from '../../contracts/policy.js';
 import type {
+  BudgetRequest,
   InvocationInput,
   InvocationRecord,
   InvocationUsage,
@@ -44,6 +46,9 @@ export function mapRow(raw: Record<string, unknown>): InvocationRow {
     activeRunRegisteredAt:
       (raw.active_run_registered_at as Date | null) ?? null,
     pendingToolCall: raw.pending_tool_call ?? null,
+    pendingBudgetRequest:
+      (raw.pending_budget_request as BudgetRequest | null) ?? null,
+    budgetGrants: (raw.budget_grants as BudgetGrant | null) ?? null,
     startedAt: (raw.started_at as Date | null) ?? null,
     completedAt: (raw.completed_at as Date | null) ?? null,
     failedAt: (raw.failed_at as Date | null) ?? null,
@@ -64,14 +69,53 @@ export function toPendingToolCall(raw: unknown): PendingToolCall | undefined {
   return { toolName, input: (raw as { input?: unknown }).input };
 }
 
+export function toBudgetRequest(raw: unknown): BudgetRequest | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const request = raw as Partial<BudgetRequest>;
+  if (
+    typeof request.requestId !== 'string' ||
+    !Array.isArray(request.limits) ||
+    typeof request.usage !== 'object' ||
+    request.usage === null
+  ) {
+    return undefined;
+  }
+  return {
+    requestId: request.requestId,
+    limits: request.limits,
+    usage: request.usage,
+  };
+}
+
+export function toBudgetGrants(raw: unknown): BudgetGrant | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const grants = raw as BudgetGrant;
+  if (grants.maxTokens === undefined && grants.maxCostUsd === undefined) {
+    return undefined;
+  }
+  return {
+    ...(grants.maxTokens !== undefined ? { maxTokens: grants.maxTokens } : {}),
+    ...(grants.maxCostUsd !== undefined
+      ? { maxCostUsd: grants.maxCostUsd }
+      : {}),
+  };
+}
+
 export function toRecord(row: InvocationRow): InvocationRecord {
+  const pendingToolCall = toPendingToolCall(row.pendingToolCall);
+  const pendingBudgetRequest = toBudgetRequest(row.pendingBudgetRequest);
   return {
     ...row.input,
     id: String(row.id),
     status: row.status,
     attemptCount: row.attemptCount,
     resultText: row.resultText ?? undefined,
-    pendingToolCall: toPendingToolCall(row.pendingToolCall),
+    ...(pendingBudgetRequest
+      ? { pendingApprovalKind: 'budget' as const, pendingBudgetRequest }
+      : pendingToolCall
+        ? { pendingApprovalKind: 'tool' as const, pendingToolCall }
+        : {}),
+    budgetGrants: toBudgetGrants(row.budgetGrants),
     lastErrorCode: row.lastErrorCode ?? undefined,
     lastErrorMessage: row.lastErrorMessage ?? undefined,
     createdAt: row.createdAt,
@@ -274,6 +318,7 @@ export async function markInvocationSucceeded(
         provider = ${result.provider ?? null},
         model = ${result.model ?? null},
         pending_tool_call = null,
+        pending_budget_request = null,
         completed_at = now(),
         failed_at = null,
         ${CLEAR_CLAIM},
@@ -286,28 +331,86 @@ export async function markInvocationSucceeded(
 }
 
 // A parked run is a pause, not a failed attempt: hand the attempt back.
+export type ParkRequest =
+  | { kind: 'tool'; toolCall: PendingToolCall }
+  | {
+      kind: 'budget';
+      request: BudgetRequest;
+      detail?: Record<string, unknown>;
+    };
+
 export async function markInvocationAwaitingApproval(
   db: Database,
   id: number,
   workerId: string,
   runId: string,
-  pendingToolCall: PendingToolCall,
+  park: ParkRequest,
 ): Promise<InvocationRow | undefined> {
-  const updated = await db.execute(sql`
-    update agent_runtime.invocations
-    set status = 'awaiting_approval',
-        pending_tool_call = ${JSON.stringify(pendingToolCall)}::jsonb,
-        attempt_count = greatest(attempt_count - 1, 0),
-        last_error_code = null,
-        last_error_message = null,
-        ${CLEAR_CLAIM},
-        updated_at = now()
-    where id = ${id} and claimed_by = ${workerId} and status = 'running'
-      and active_run_id = ${runId}
-    returning *
-  `);
-  const raw = updated.rows[0] as Record<string, unknown> | undefined;
-  return raw ? mapRow(raw) : undefined;
+  return db.transaction(async (tx) => {
+    const updated =
+      park.kind === 'tool'
+        ? await tx.execute(sql`
+            update agent_runtime.invocations
+            set status = 'awaiting_approval',
+                pending_tool_call = ${JSON.stringify(park.toolCall)}::jsonb,
+                pending_budget_request = null,
+                attempt_count = greatest(attempt_count - 1, 0),
+                last_error_code = null,
+                last_error_message = null,
+                ${CLEAR_CLAIM},
+                updated_at = now()
+            where id = ${id} and claimed_by = ${workerId} and status = 'running'
+              and active_run_id = ${runId}
+            returning *
+          `)
+        : await tx.execute(sql`
+            update agent_runtime.invocations
+            set status = 'awaiting_approval',
+                pending_budget_request = ${JSON.stringify(park.request)}::jsonb,
+                pending_tool_call = null,
+                input_tokens = ${park.request.usage.inputTokens},
+                output_tokens = ${park.request.usage.outputTokens},
+                cache_read_tokens = ${park.request.usage.cacheReadTokens},
+                cache_write_tokens = ${park.request.usage.cacheWriteTokens},
+                reasoning_tokens = ${park.request.usage.reasoningTokens},
+                cost_usd = ${park.request.usage.costUsd ?? null},
+                usage_steps = ${JSON.stringify(park.request.usage.steps)}::jsonb,
+                attempt_count = greatest(attempt_count - 1, 0),
+                last_error_code = null,
+                last_error_message = null,
+                ${CLEAR_CLAIM},
+                updated_at = now()
+            where id = ${id} and claimed_by = ${workerId} and status = 'running'
+              and active_run_id = ${runId}
+            returning *
+          `);
+    const raw = updated.rows[0] as Record<string, unknown> | undefined;
+    if (!raw) return undefined;
+    // A park is published only with its durable audit: the insert shares the
+    // transaction, so an audit failure leaves the run owned and un-parked.
+    if (park.kind === 'budget') {
+      await tx.execute(sql`
+        insert into agent_runtime.policy_decisions
+          (scope, invocation_id, run_id, tool_name, rule, decision, detail)
+        values (
+          ${raw.scope as string},
+          ${id},
+          ${park.request.requestId},
+          null,
+          'budget',
+          'approval_requested',
+          ${JSON.stringify({
+            event: 'approval_requested',
+            requestId: park.request.requestId,
+            limits: park.request.limits,
+            usage: park.request.usage,
+            ...park.detail,
+          })}::jsonb
+        )
+      `);
+    }
+    return mapRow(raw);
+  });
 }
 
 // Claim already counted this attempt; failure must not increment it again.
@@ -328,6 +431,7 @@ export async function markInvocationFailed(
         failed_at = case when ${terminal} or attempt_count >= max_attempts then now() else failed_at end,
         completed_at = case when ${terminal} or attempt_count >= max_attempts then now() else completed_at end,
         pending_tool_call = case when ${terminal} or attempt_count >= max_attempts then null else pending_tool_call end,
+        pending_budget_request = case when ${terminal} or attempt_count >= max_attempts then null else pending_budget_request end,
         input_tokens = ${options.usage?.inputTokens ?? null},
         output_tokens = ${options.usage?.outputTokens ?? null},
         cache_read_tokens = ${options.usage?.cacheReadTokens ?? null},

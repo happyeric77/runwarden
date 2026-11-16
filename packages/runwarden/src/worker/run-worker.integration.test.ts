@@ -506,6 +506,111 @@ describe('runWorker', () => {
     }
   });
 
+  it('fails closed instead of parking when the crossing audit cannot persist', async () => {
+    await handle.pool.query(
+      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+    );
+    let listener: ((decision: PolicyDecision) => void) | undefined;
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-audit-budget-park',
+      prompt: 'budget',
+      maxAttempts: 3,
+    });
+    const usage = {
+      ...emptyInvocationUsage(),
+      inputTokens: 6,
+      outputTokens: 5,
+      costIncomplete: true,
+      steps: [
+        {
+          provider: 'mock-provider',
+          model: 'mock-model',
+          inputTokens: 6,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          usageKnown: true,
+          costKnown: false,
+        },
+      ],
+    };
+    const worker = runWorker({
+      db: handle,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+      runtime: {
+        [RUNTIME_INTERNALS]: {
+          onPolicyDecision(callback) {
+            listener = callback;
+            return () => {
+              listener = undefined;
+            };
+          },
+        },
+        engine: {
+          async invoke(input) {
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'exceeded',
+              detail: { limitKind: 'tokens', accumulated: 11, limit: 10 },
+            });
+            throw new AgentRuntimeError(
+              'budget',
+              'Budget approval required',
+              {
+                code: 'budget_approval_required',
+                limits: [
+                  {
+                    limitKind: 'tokens',
+                    accumulated: 11,
+                    limit: 10,
+                    stepNumber: 1,
+                    completeness: 'complete',
+                  },
+                ],
+              },
+              { usage },
+            );
+          },
+        },
+      },
+    });
+    try {
+      await waitFor(
+        async () =>
+          (await getInvocationRowById(handle.db, invocationId))?.status ===
+          'failed',
+      );
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row).toMatchObject({
+        status: 'failed',
+        lastErrorCode: 'audit_persistence_failed',
+        pendingBudgetRequest: null,
+        inputTokens: 6,
+        outputTokens: 5,
+      });
+      expect(
+        (
+          await handle.pool.query(
+            'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+            [invocationId],
+          )
+        ).rows[0].count,
+      ).toBe(0);
+    } finally {
+      await worker.stop();
+      await handle.pool.query(
+        'drop trigger reject_audit on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.reject_audit()');
+    }
+  });
+
   it('discards a late result after heartbeat reports lost ownership', async () => {
     const { invocationId } = await enqueueInvocation(handle.db, {
       scope: 'scope-lost',
@@ -1034,6 +1139,414 @@ describe('durable defineRuntime', () => {
         },
         usage: error.usage,
       });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('parks a durable budget crossing and resumes with an approved grant', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const settled: InvocationRecord[] = [];
+    const parkedRequests: Array<{ kind: string }> = [];
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        modelCalls += 1;
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('task result')) {
+          return finishStep([{ type: 'text', text: 'Done.' }], {
+            inputTokens: { total: 1, noCache: 1 },
+            outputTokens: { total: 1, text: 1 },
+          });
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-park',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+      onInvocationSettled: (record) => {
+        settled.push(record);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+      onAwaitingApproval: async (_record, request) => {
+        parkedRequests.push({ kind: request.kind });
+      },
+    });
+    try {
+      const parked = await runtime.enqueue({
+        scope: 'scope-budget-approval',
+        prompt: 'List my tasks',
+        maxAttempts: 1,
+        orderingKey: 'budget-order',
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(parked.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const parkedRow = await getInvocationRowById(
+        handle.db,
+        parked.invocationId,
+      );
+      expect(parkedRow).toMatchObject({
+        status: 'awaiting_approval',
+        attemptCount: 0,
+        inputTokens: 6,
+        outputTokens: 5,
+        pendingToolCall: null,
+        budgetGrants: null,
+      });
+      expect(parkedRow?.pendingBudgetRequest).toMatchObject({
+        requestId: parkedRow?.activeRunId,
+        limits: [{ limitKind: 'tokens', accumulated: 11, limit: 10 }],
+        usage: { inputTokens: 6, outputTokens: 5 },
+      });
+      expect(parkedRow?.pendingBudgetRequest?.requestId).toBe(
+        parkedRow?.activeRunId,
+      );
+      const parkedRunId = parkedRow!.activeRunId!;
+      expect(parkedRequests).toEqual([{ kind: 'budget' }]);
+      expect(settled).toHaveLength(0);
+      expect(modelCalls).toBe(1);
+      expect(mcp.calls()).toBe(1);
+
+      const pending = await runtime.listPendingApprovals(
+        'scope-budget-approval',
+      );
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        id: parked.invocationId,
+        pendingApprovalKind: 'budget',
+        pendingBudgetRequest: { requestId: parkedRunId },
+      });
+      expect(pending[0]?.pendingToolCall).toBeUndefined();
+
+      const follower = await runtime.enqueue({
+        scope: 'scope-budget-approval',
+        prompt: 'Follower',
+        orderingKey: 'budget-order',
+      });
+      await sleep(150);
+      expect((await runtime.getInvocation(follower.invocationId))?.status).toBe(
+        'pending',
+      );
+
+      await expect(
+        runtime.approveInvocation(parked.invocationId, {
+          grant: { maxTokens: 5 },
+        }),
+      ).rejects.toMatchObject({
+        diagnostics: { code: 'approval_request_stale' },
+      });
+      expect((await runtime.getInvocation(parked.invocationId))?.status).toBe(
+        'awaiting_approval',
+      );
+
+      const approved = await runtime.approveInvocation(parked.invocationId, {
+        grant: { maxTokens: 5 },
+        requestId: parkedRunId,
+        resolvedBy: 'admin-1',
+      });
+      expect(approved.status).toBe('pending');
+      expect(approved.budgetGrants).toEqual({ maxTokens: 5 });
+
+      const result = await runtime.waitForInvocation(parked.invocationId, {
+        pollIntervalMs: 20,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Done.');
+      const finished = await getInvocationRowById(
+        handle.db,
+        parked.invocationId,
+      );
+      expect(finished).toMatchObject({
+        status: 'succeeded',
+        attemptCount: 1,
+        budgetGrants: { maxTokens: 5 },
+        pendingBudgetRequest: null,
+      });
+      expect(finished?.activeRunId).not.toBe(parkedRunId);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: parked.invocationId,
+        status: 'succeeded',
+      });
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+          where invocation_id = $1 and rule = 'budget' order by id`,
+        [parked.invocationId],
+      );
+      expect(
+        decisions.rows
+          .map((row) => row.decision)
+          .filter(
+            (decision) => decision !== 'warning' && decision !== 'exceeded',
+          ),
+      ).toEqual(['approval_requested', 'approved']);
+
+      // The ordering key stays held until settlement; the follower now parks.
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(follower.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      expect(modelCalls).toBe(4);
+      expect(mcp.calls()).toBe(3);
+      const followerRow = await getInvocationRowById(
+        handle.db,
+        follower.invocationId,
+      );
+      await runtime.rejectInvocation(follower.invocationId, {
+        requestId: followerRow!.pendingBudgetRequest!.requestId,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('rejects a durable budget park without retrying and keeps park usage', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const settled: InvocationRecord[] = [];
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-reject',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+      onInvocationSettled: (record) => {
+        settled.push(record);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-budget-reject',
+        prompt: 'List my tasks',
+        maxAttempts: 3,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      const rejected = await runtime.rejectInvocation(invocationId, {
+        requestId: parked!.pendingBudgetRequest!.requestId,
+        note: 'quota denied',
+      });
+      expect(rejected).toMatchObject({
+        status: 'failed',
+        lastErrorCode: 'budget_exceeded',
+        lastErrorMessage: 'quota denied',
+      });
+      expect(await getInvocationRowById(handle.db, invocationId)).toMatchObject(
+        { inputTokens: 6, outputTokens: 5, pendingBudgetRequest: null },
+      );
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 10,
+          waitTimeoutMs: 1_000,
+        }),
+      ).rejects.toMatchObject({
+        kind: 'budget',
+        diagnostics: { code: 'budget_exceeded' },
+        usage: { inputTokens: 6, outputTokens: 5 },
+      });
+      await sleep(250);
+      expect(modelCalls).toBe(1);
+      // Parking handed the claim back; rejection must not requeue or spend it.
+      expect(
+        (await getInvocationRowById(handle.db, invocationId))?.attemptCount,
+      ).toBe(0);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+        lastErrorCode: 'budget_exceeded',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('parks again when a resumed run crosses its raised limit', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('task result')) {
+          return finishStep([{ type: 'text', text: 'Done.' }], {
+            inputTokens: { total: 1, noCache: 1 },
+            outputTokens: { total: 1, text: 1 },
+          });
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-repark',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-budget-repark',
+        prompt: 'List my tasks',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const firstPark = await getInvocationRowById(handle.db, invocationId);
+      const firstRunId = firstPark!.pendingBudgetRequest!.requestId;
+      await runtime.approveInvocation(invocationId, {
+        grant: { maxTokens: 1 },
+        requestId: firstRunId,
+      });
+
+      // The 11-token step now equals the raised 11-token limit and parks again.
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const secondPark = await getInvocationRowById(handle.db, invocationId);
+      const secondRunId = secondPark!.pendingBudgetRequest!.requestId;
+      expect(secondRunId).not.toBe(firstRunId);
+      expect(secondPark?.budgetGrants).toEqual({ maxTokens: 1 });
+      expect(secondPark?.pendingBudgetRequest?.limits).toMatchObject([
+        { accumulated: 11, limit: 11 },
+      ]);
+      await runtime.approveInvocation(invocationId, {
+        grant: { maxTokens: 10 },
+        requestId: secondRunId,
+      });
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 20,
+          waitTimeoutMs: 30_000,
+        }),
+      ).resolves.toMatchObject({ text: 'Done.' });
+      const finished = await getInvocationRowById(handle.db, invocationId);
+      expect(finished).toMatchObject({
+        status: 'succeeded',
+        budgetGrants: { maxTokens: 11 },
+        attemptCount: 1,
+      });
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+          where invocation_id = $1 and rule = 'budget' order by id`,
+        [invocationId],
+      );
+      expect(
+        decisions.rows
+          .map((row) => row.decision)
+          .filter(
+            (decision) => decision !== 'warning' && decision !== 'exceeded',
+          ),
+      ).toEqual([
+        'approval_requested',
+        'approved',
+        'approval_requested',
+        'approved',
+      ]);
     } finally {
       await worker.stop();
     }

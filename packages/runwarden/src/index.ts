@@ -22,6 +22,8 @@ export {
 
 export type {
   AgentRuntime,
+  AwaitingApprovalRequest,
+  BudgetRequest,
   HistoryLoader,
   InvocationInput,
   InvocationRecord,
@@ -52,6 +54,7 @@ export type {
 export type {
   BudgetCompleteness,
   BudgetExceededLimit,
+  BudgetGrant,
   BudgetLimitKind,
   BudgetWarning,
   BudgetWarningEvent,

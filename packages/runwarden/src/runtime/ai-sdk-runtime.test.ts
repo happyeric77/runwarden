@@ -1571,6 +1571,299 @@ describe('AiSdkNativeRuntime', () => {
     expect(subject.model.doGenerateCalls).toHaveLength(0);
   });
 
+  it('parks an approve crossing for quota approval instead of failing', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('park-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(AgentRuntimeError);
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        effectiveLimits: { maxTokens: 10 },
+        limits: [
+          {
+            limitKind: 'tokens',
+            accumulated: 11,
+            limit: 10,
+            stepNumber: 1,
+            completeness: 'complete',
+          },
+        ],
+      },
+      usage: { inputTokens: 11, outputTokens: 0 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.callTool).toHaveBeenCalledTimes(1);
+    expect(
+      decisions.filter((decision) => decision.rule === 'budget'),
+    ).toMatchObject([{ decision: 'warning' }, { decision: 'exceeded' }]);
+  });
+
+  it('degrades approve to a budget stop on direct execution', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('direct-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: { code: 'budget_exceeded' },
+      usage: { inputTokens: 11 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+  });
+
+  it('continues under accumulated grants and parks again at the raised limit', async () => {
+    const raise = runtime(
+      [
+        metered(
+          toolStep(toolCall('grant-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Done'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    // 11 crossed the configured 10, but a 5-token grant raises it to 15.
+    await expect(
+      raise.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 5 },
+      }),
+    ).resolves.toMatchObject({ text: 'Done' });
+
+    const repark = runtime(
+      [
+        metered(
+          toolStep(toolCall('grant-2', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(
+          toolStep(toolCall('grant-3', directoryTools.get, { recordId: 8 })),
+          10,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    const error = await repark.instance
+      .invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 10 },
+      })
+      .catch((cause) => cause);
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens', accumulated: 21, limit: 20 }],
+      },
+    });
+    expect(repark.model.doGenerateCalls).toHaveLength(2);
+  });
+
+  it('applies a grant only to its configured dimension and rejects bad grants', async () => {
+    const unconfigured = runtime([textStep('Done')], {
+      policies: { budget: { maxCostUsd: 0.01, onExceeded: 'approve' } },
+    });
+    await expect(
+      unconfigured.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 5 },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+    expect(unconfigured.model.doGenerateCalls).toHaveLength(0);
+
+    const zero = runtime([textStep('Done')], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+    await expect(
+      zero.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 0 },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+
+    const overflow = runtime([textStep('Done')], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+    await expect(
+      overflow.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: Number.MAX_SAFE_INTEGER },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+    expect(overflow.model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it('parks for tokens only when cost is unknown', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('unknown-cost-park', directoryTools.get, { recordId: 7 }),
+          ),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          budget: {
+            maxTokens: 10,
+            maxCostUsd: 0.000001,
+            onExceeded: 'approve',
+          },
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens' }],
+      },
+    });
+    expect(
+      decisions.filter((decision) => decision.decision === 'incomplete'),
+    ).toMatchObject([{ detail: { limitKind: 'costUsd' } }]);
+  });
+
+  it('returns a final answer on an approve crossing without parking', async () => {
+    const subject = runtime([metered(textStep('Done'), 12, 0)], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+
+    await expect(
+      subject.instance.invoke({ ...invocation, budgetParkable: true }),
+    ).resolves.toMatchObject({ text: 'Done' });
+  });
+
+  it('keeps an existing tool approval when a budget also crosses', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('gated-budget', directoryTools.get, { recordId: 7 }),
+          ),
+          11,
+          0,
+        ),
+      ],
+      {
+        policies: {
+          requireApproval: [directoryTools.get],
+          budget: { maxTokens: 10, onExceeded: 'approve' },
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'failure',
+      diagnostics: {
+        code: 'approval_required',
+        pendingToolCall: { toolName: directoryTools.get },
+      },
+    });
+    expect(error.diagnostics).not.toHaveProperty('budgetRequest');
+    expect(
+      decisions.find(
+        (decision) =>
+          decision.decision === 'exceeded' &&
+          decision.detail?.['terminal'] === 'approval_required',
+      ),
+    ).toBeDefined();
+  });
+
+  it('parks a crossing on a text-only correction', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('correction-park-a', directoryTools.get, { recordId: 1 }),
+            toolCall('correction-park-b', directoryTools.get, { recordId: 2 }),
+          ),
+          1,
+          0,
+        ),
+        metered(textStep('Still correcting'), 9, 0),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          correctionBudget: 2,
+          budget: { maxTokens: 10, onExceeded: 'approve' },
+        },
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens', accumulated: 10, limit: 10 }],
+      },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
+  });
+
   it('denies a multi-call step before MCP and lets the SDK request one corrected tool', async () => {
     const subject = runtime([
       toolStep(

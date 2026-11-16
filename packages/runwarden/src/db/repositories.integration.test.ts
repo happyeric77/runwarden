@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import type { InvocationUsage } from '../contracts/runtime.js';
 import { createDb, type DatabaseHandle } from './client.js';
 import { initDb } from './init.js';
-import { resolveInvocationApproval } from './repositories/approvals.js';
+import {
+  resolveInvocationApproval,
+  type ApprovalResolution,
+} from './repositories/approvals.js';
 import {
   claimInvocations,
   enqueueInvocation,
@@ -24,6 +28,52 @@ import {
 import { startTestPostgres, type TestPostgres } from './test-postgres.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function budgetUsage(
+  inputTokens: number,
+  outputTokens: number,
+): InvocationUsage {
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costIncomplete: true,
+    steps: [
+      {
+        provider: 'mock-provider',
+        model: 'mock-model',
+        inputTokens,
+        outputTokens,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        usageKnown: true,
+        costKnown: false,
+      },
+    ],
+  };
+}
+
+function resolvedRow(result: ApprovalResolution) {
+  if (result.outcome !== 'resolved') {
+    throw new Error(`expected resolved, got ${result.outcome}`);
+  }
+  return result.row;
+}
+
+function budgetLimit(accumulated: number, limit = 10) {
+  return [
+    {
+      limitKind: 'tokens' as const,
+      accumulated,
+      limit,
+      stepNumber: 1,
+      completeness: 'complete' as const,
+    },
+  ];
+}
 
 describe('invocation repositories', () => {
   let pg: TestPostgres;
@@ -458,7 +508,7 @@ describe('invocation repositories', () => {
         row!.id,
         'approval-worker',
         row!.activeRunId!,
-        pending,
+        { kind: 'tool', toolCall: pending },
       );
       const client = await handle.pool.connect();
       try {
@@ -564,7 +614,7 @@ describe('invocation repositories', () => {
         row!.id,
         'wrong-worker',
         row!.activeRunId!,
-        pending,
+        { kind: 'tool', toolCall: pending },
       ),
     ).toBeUndefined();
     expect(
@@ -573,7 +623,7 @@ describe('invocation repositories', () => {
         row!.id,
         'approval-retry',
         '00000000-0000-4000-8000-000000000000',
-        pending,
+        { kind: 'tool', toolCall: pending },
       ),
     ).toBeUndefined();
     await markInvocationAwaitingApproval(
@@ -581,7 +631,7 @@ describe('invocation repositories', () => {
       row!.id,
       'approval-retry',
       row!.activeRunId!,
-      pending,
+      { kind: 'tool', toolCall: pending },
     );
     const follower = await enqueueInvocation(handle.db, {
       scope: 'approval-retry',
@@ -659,5 +709,581 @@ describe('invocation repositories', () => {
       next!.activeRunId!,
       { resultText: 'done' },
     );
+  });
+
+  async function claimSpecific(invocationId: string, workerId: string) {
+    // Earlier tests leave claimable rows behind; settle them so this test owns
+    // its own freshly enqueued invocation.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const {
+        claimed: [row],
+      } = await claimInvocations(handle.db, workerId, {
+        leaseTimeoutMs: 30_000,
+        maxBatchSize: 1,
+      });
+      if (!row) throw new Error('no claim available');
+      if (String(row.id) === invocationId) return row;
+      await markInvocationFailed(
+        handle.db,
+        row.id,
+        workerId,
+        row.activeRunId!,
+        { code: 'test_cleanup', message: 'test cleanup' },
+        0,
+        { retryable: false },
+      );
+    }
+    throw new Error(`invocation ${invocationId} was never claimed`);
+  }
+
+  async function claimForPark(
+    scope: string,
+    workerId: string,
+    prompt = 'park',
+  ) {
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope,
+      prompt,
+    });
+    return { invocationId, row: await claimSpecific(invocationId, workerId) };
+  }
+
+  async function parkBudget(scope: string, workerId: string, accumulated = 11) {
+    const { invocationId, row } = await claimForPark(scope, workerId);
+    const usage = budgetUsage(6, 5);
+    const request = {
+      requestId: row.activeRunId!,
+      limits: budgetLimit(accumulated),
+      usage,
+    };
+    const parked = await markInvocationAwaitingApproval(
+      handle.db,
+      row.id,
+      workerId,
+      row.activeRunId!,
+      {
+        kind: 'budget',
+        request,
+        detail: { effectiveLimits: { maxTokens: 10 } },
+      },
+    );
+    expect(parked?.status).toBe('awaiting_approval');
+    return { invocationId, row, request, usage };
+  }
+
+  it('parks a budget request with usage and its audit atomically', async () => {
+    const { invocationId, row, request, usage } = await parkBudget(
+      'budget-park',
+      'budget-worker',
+    );
+
+    const parked = await getInvocationRowById(handle.db, invocationId);
+    expect(parked).toMatchObject({
+      status: 'awaiting_approval',
+      attemptCount: 0,
+      pendingToolCall: null,
+      pendingBudgetRequest: request,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      usageSteps: usage.steps,
+    });
+    expect(parked?.claimedBy).toBeNull();
+
+    const audits = await handle.pool.query(
+      `select rule, decision, run_id, tool_name, detail
+         from agent_runtime.policy_decisions where invocation_id = $1`,
+      [invocationId],
+    );
+    expect(audits.rows).toEqual([
+      {
+        rule: 'budget',
+        decision: 'approval_requested',
+        run_id: row.activeRunId,
+        tool_name: null,
+        detail: {
+          event: 'approval_requested',
+          requestId: row.activeRunId,
+          limits: request.limits,
+          usage,
+          effectiveLimits: { maxTokens: 10 },
+        },
+      },
+    ]);
+
+    expect(
+      await markInvocationAwaitingApproval(
+        handle.db,
+        row.id,
+        'other-worker',
+        row.activeRunId!,
+        { kind: 'budget', request },
+      ),
+    ).toBeUndefined();
+    expect(
+      await markInvocationAwaitingApproval(
+        handle.db,
+        row.id,
+        'budget-worker',
+        '00000000-0000-4000-8000-000000000000',
+        { kind: 'budget', request },
+      ),
+    ).toBeUndefined();
+    expect(
+      (await getInvocationRowById(handle.db, invocationId))
+        ?.pendingBudgetRequest,
+    ).toEqual(request);
+  });
+
+  it('rolls back a budget park when its audit insert fails', async () => {
+    const { invocationId, row } = await claimForPark(
+      'budget-park-audit',
+      'budget-audit-worker',
+    );
+    const usage = budgetUsage(6, 5);
+    const request = {
+      requestId: row.activeRunId!,
+      limits: budgetLimit(11),
+      usage,
+    };
+    await handle.pool.query(
+      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+    );
+    try {
+      await expect(
+        markInvocationAwaitingApproval(
+          handle.db,
+          row.id,
+          'budget-audit-worker',
+          row.activeRunId!,
+          { kind: 'budget', request },
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await handle.pool.query(
+        'drop trigger reject_audit on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.reject_audit()');
+    }
+    const still = await getInvocationRowById(handle.db, invocationId);
+    expect(still).toMatchObject({
+      status: 'running',
+      pendingBudgetRequest: null,
+      inputTokens: null,
+      claimedBy: 'budget-audit-worker',
+    });
+    expect(
+      (
+        await handle.pool.query(
+          'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    // Hand the claim back so the row cannot be reclaimed by a later test.
+    await handle.pool.query(
+      "update agent_runtime.invocations set status='cancelled' where id=$1",
+      [invocationId],
+    );
+  });
+
+  it('approves with a grant, accumulates across parks, and keeps the park snapshot', async () => {
+    const configured = { maxTokens: 10 };
+    const first = await parkBudget('budget-grant', 'grant-worker');
+    const approved = await resolveInvocationApproval(
+      handle.db,
+      first.invocationId,
+      'approved',
+      {
+        resolvedBy: 'admin',
+        grant: { maxTokens: 5 },
+        requestId: first.request.requestId,
+      },
+      configured,
+    );
+    expect(resolvedRow(approved)).toMatchObject({
+      status: 'pending',
+      pendingBudgetRequest: null,
+      budgetGrants: { maxTokens: 5 },
+    });
+
+    const second = await claimSpecific(first.invocationId, 'grant-worker');
+    expect(second.budgetGrants).toEqual({ maxTokens: 5 });
+    expect(second.activeRunId).not.toBe(first.row.activeRunId);
+
+    const usage = budgetUsage(9, 6);
+    const request = {
+      requestId: second!.activeRunId!,
+      limits: budgetLimit(21, 20),
+      usage,
+    };
+    const parkedSecond = await markInvocationAwaitingApproval(
+      handle.db,
+      second!.id,
+      'grant-worker',
+      second!.activeRunId!,
+      { kind: 'budget', request },
+    );
+    expect(parkedSecond?.status).toBe('awaiting_approval');
+    const approvedAgain = await resolveInvocationApproval(
+      handle.db,
+      String(second!.id),
+      'approved',
+      { grant: { maxTokens: 5 }, requestId: request.requestId },
+      configured,
+    );
+    expect(resolvedRow(approvedAgain).budgetGrants).toEqual({ maxTokens: 10 });
+
+    const audits = await handle.pool.query<{
+      decision: string;
+      detail: unknown;
+    }>(
+      `select decision, detail from agent_runtime.policy_decisions
+        where invocation_id = $1 and rule = 'budget' order by id`,
+      [first.invocationId],
+    );
+    expect(audits.rows.map((row) => row.decision)).toEqual([
+      'approval_requested',
+      'approved',
+      'approval_requested',
+      'approved',
+    ]);
+    expect(
+      audits.rows.filter((row) => row.decision === 'approval_requested')[0]
+        ?.detail,
+    ).toMatchObject({ requestId: first.row.activeRunId, usage: first.usage });
+    expect(
+      audits.rows.filter((row) => row.decision === 'approved')[1]?.detail,
+    ).toMatchObject({
+      grants: { maxTokens: 10 },
+      effectiveLimits: { maxTokens: 20 },
+    });
+
+    // A later run's usage replaces the columns; the park audit keeps the snapshot.
+    const third = await claimSpecific(first.invocationId, 'grant-worker');
+    const resumed = budgetUsage(2, 3);
+    await markInvocationSucceeded(
+      handle.db,
+      third.id,
+      'grant-worker',
+      third.activeRunId!,
+      { resultText: 'done', usage: resumed },
+    );
+    const finished = await getInvocationRowById(handle.db, first.invocationId);
+    expect(finished).toMatchObject({
+      status: 'succeeded',
+      inputTokens: 2,
+      outputTokens: 3,
+      pendingBudgetRequest: null,
+    });
+    expect(
+      (
+        await handle.pool.query(
+          `select detail from agent_runtime.policy_decisions
+            where invocation_id = $1 and decision = 'approval_requested' order by id`,
+          [first.invocationId],
+        )
+      ).rows.map((row) => row.detail.usage),
+    ).toEqual([first.usage, usage]);
+  });
+
+  it('rejects a stale request identity without touching the newer park', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-stale',
+      'stale-worker',
+    );
+
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 5 } },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'rejected',
+        { requestId: '00000000-0000-4000-8000-000000000000' },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+
+    const parked = await getInvocationRowById(handle.db, invocationId);
+    expect(parked).toMatchObject({
+      status: 'awaiting_approval',
+      pendingBudgetRequest: request,
+      budgetGrants: null,
+    });
+    expect(
+      (
+        await handle.pool.query(
+          'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        )
+      ).rows[0].count,
+    ).toBe(1);
+
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 5 }, requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'resolved' });
+  });
+
+  it('rejects a stale budget request when a newer tool park is pending', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-cross-kind',
+      'cross-kind-worker-1',
+    );
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 20 }, requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'resolved' });
+
+    const resumed = await claimSpecific(invocationId, 'cross-kind-worker-2');
+    expect(resumed.activeRunId).not.toBe(request.requestId);
+
+    const toolCall = { toolName: 'gated', input: { amount: 1 } };
+    await markInvocationAwaitingApproval(
+      handle.db,
+      resumed.id,
+      'cross-kind-worker-2',
+      resumed.activeRunId!,
+      { kind: 'tool', toolCall },
+    );
+
+    const decisionCount = (
+      await handle.pool.query(
+        'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+        [invocationId],
+      )
+    ).rows[0].count;
+
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'rejected',
+        { requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { requestId: request.requestId, grant: { maxTokens: 20 } },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'stale_request' });
+
+    await expect(
+      getInvocationRowById(handle.db, invocationId),
+    ).resolves.toMatchObject({
+      status: 'awaiting_approval',
+      pendingToolCall: toolCall,
+      pendingBudgetRequest: null,
+      budgetGrants: { maxTokens: 20 },
+    });
+    expect(
+      (
+        await handle.pool.query(
+          'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        )
+      ).rows[0].count,
+    ).toBe(decisionCount);
+  });
+
+  it('rejects invalid grants without changing state', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-invalid-grant',
+      'invalid-grant-worker',
+    );
+    for (const grant of [
+      {},
+      { maxTokens: 0 },
+      { maxTokens: 1.5 },
+      { maxCostUsd: 1 },
+    ]) {
+      await expect(
+        resolveInvocationApproval(
+          handle.db,
+          invocationId,
+          'approved',
+          { grant, requestId: request.requestId },
+          configured,
+        ),
+      ).rejects.toMatchObject({
+        diagnostics: { code: 'invalid_budget_grant' },
+      });
+    }
+    const parked = await getInvocationRowById(handle.db, invocationId);
+    expect(parked?.status).toBe('awaiting_approval');
+    expect(parked?.budgetGrants).toBeNull();
+    expect(
+      (
+        await handle.pool.query(
+          'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+          [invocationId],
+        )
+      ).rows[0].count,
+    ).toBe(1);
+    await resolveInvocationApproval(
+      handle.db,
+      invocationId,
+      'rejected',
+      { requestId: request.requestId },
+      configured,
+    );
+  });
+
+  it('rejects a grant on a tool approval', async () => {
+    const { invocationId, row } = await claimForPark(
+      'tool-grant-rejected',
+      'tool-grant-worker',
+    );
+    const toolCall = { toolName: 'gated', input: { amount: 5000 } };
+    await markInvocationAwaitingApproval(
+      handle.db,
+      row.id,
+      'tool-grant-worker',
+      row.activeRunId!,
+      { kind: 'tool', toolCall },
+    );
+
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 5 } },
+        { maxTokens: 10 },
+      ),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+    const parked = await getInvocationRowById(handle.db, invocationId);
+    expect(parked).toMatchObject({
+      status: 'awaiting_approval',
+      pendingToolCall: toolCall,
+    });
+    await resolveInvocationApproval(handle.db, invocationId, 'approved');
+  });
+
+  it('rejects a budget park as a non-retryable budget failure with usage kept', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-reject',
+      'reject-worker',
+    );
+    const rejected = await resolveInvocationApproval(
+      handle.db,
+      invocationId,
+      'rejected',
+      { requestId: request.requestId, note: 'quota denied' },
+      configured,
+    );
+    expect(resolvedRow(rejected)).toMatchObject({
+      status: 'failed',
+      lastErrorCode: 'budget_exceeded',
+      lastErrorMessage: 'quota denied',
+      budgetGrants: null,
+      pendingBudgetRequest: null,
+      inputTokens: 6,
+      outputTokens: 5,
+    });
+    const audits = await handle.pool.query(
+      `select decision, detail from agent_runtime.policy_decisions
+        where invocation_id = $1 and rule = 'budget' order by id`,
+      [invocationId],
+    );
+    expect(audits.rows.map((row) => row.decision)).toEqual([
+      'approval_requested',
+      'rejected',
+    ]);
+    expect(audits.rows[1]?.detail).toMatchObject({
+      requestId: request.requestId,
+      effectiveLimits: { maxTokens: 10 },
+      note: 'quota denied',
+    });
+    await expect(
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 5 }, requestId: request.requestId },
+        configured,
+      ),
+    ).resolves.toMatchObject({ outcome: 'not_awaiting' });
+  });
+
+  it('applies exactly one concurrent budget resolution', async () => {
+    const configured = { maxTokens: 10 };
+    const { invocationId, request } = await parkBudget(
+      'budget-race',
+      'race-budget-worker',
+    );
+    const results = await Promise.all([
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'approved',
+        { grant: { maxTokens: 5 }, requestId: request.requestId },
+        configured,
+      ),
+      resolveInvocationApproval(
+        handle.db,
+        invocationId,
+        'rejected',
+        { requestId: request.requestId },
+        configured,
+      ),
+    ]);
+    expect(results.map((result) => result.outcome).sort()).toEqual([
+      'not_awaiting',
+      'resolved',
+    ]);
+    const row = await getInvocationRowById(handle.db, invocationId);
+    expect(['pending', 'failed']).toContain(row?.status);
+    expect(
+      (
+        await handle.pool.query(
+          `select decision from agent_runtime.policy_decisions
+            where invocation_id = $1 and rule = 'budget' order by id`,
+          [invocationId],
+        )
+      ).rows.map((entry) => entry.decision),
+    ).toEqual([
+      'approval_requested',
+      row?.status === 'pending' ? 'approved' : 'rejected',
+    ]);
+    if (row?.status === 'pending') {
+      const claimed = await claimSpecific(invocationId, 'race-budget-worker');
+      await markInvocationSucceeded(
+        handle.db,
+        claimed.id,
+        'race-budget-worker',
+        claimed.activeRunId!,
+        { resultText: 'done' },
+      );
+    }
   });
 });
