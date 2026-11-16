@@ -3,6 +3,7 @@ import type {
   InvocationResult,
   RuntimeInvocationInput,
 } from './contracts/runtime.js';
+import { emptyInvocationUsage } from './runtime/usage.js';
 
 export type FakeAgentRuntimeResultFactory = (
   input: RuntimeInvocationInput,
@@ -35,6 +36,7 @@ export class FakeAgentRuntime implements AgentRuntime {
         { role: 'user', content: input.prompt },
         { role: 'assistant', content: text },
       ],
+      usage: emptyInvocationUsage(),
       provider: 'fake',
       model: 'fake-agent-runtime',
     };

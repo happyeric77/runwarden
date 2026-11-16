@@ -4,6 +4,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgSchema,
   text,
   timestamp,
@@ -16,6 +17,7 @@ import type {
   InvocationInput,
   InvocationStatus,
   NeutralMessage,
+  UsageStep,
 } from '../contracts/runtime.js';
 
 export const runtimeSchema = pgSchema('agent_runtime');
@@ -63,6 +65,17 @@ export const invocations = runtimeSchema.table(
     input: jsonb('input').$type<InvocationInput>().notNull(),
     resultText: text('result_text'),
     resultMessages: jsonb('result_messages').$type<NeutralMessage[]>(),
+    inputTokens: bigint('input_tokens', { mode: 'number' }),
+    outputTokens: bigint('output_tokens', { mode: 'number' }),
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+    reasoningTokens: bigint('reasoning_tokens', { mode: 'number' }),
+    costUsd: numeric('cost_usd', {
+      precision: 30,
+      scale: 12,
+      mode: 'number',
+    }),
+    usageSteps: jsonb('usage_steps').$type<UsageStep[]>(),
     idempotencyKey: text('idempotency_key'),
     status: invocationStatusEnum('status')
       .notNull()

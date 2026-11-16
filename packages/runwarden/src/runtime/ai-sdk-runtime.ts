@@ -36,9 +36,11 @@ import type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
 } from '../contracts/runtime.js';
 import { deriveToolCallIdempotencyKey } from './canonical-json.js';
 import { PolicyEngine, type ParsedToolCall } from './policy-engine.js';
+import { buildInvocationUsage } from './usage.js';
 
 const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
@@ -55,6 +57,7 @@ interface AiSdkNativeRuntimeOptions {
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
   policies?: RuntimePolicies;
+  pricing?: UsagePricingOptions;
   now?: () => number;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
@@ -496,6 +499,14 @@ export class AiSdkNativeRuntime implements AgentRuntime {
             producedNeutralMessages(step.response.messages),
           ),
         ],
+        usage: buildInvocationUsage(
+          steps.map((step) => ({
+            usage: step.usage,
+            provider: normalizeProviderName(step.model.provider),
+            model: step.model.modelId,
+          })),
+          this.options.pricing,
+        ),
         provider,
         model,
       };

@@ -14,11 +14,48 @@ export interface InvocationInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface UsageTokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+export interface UsageStep extends UsageTokenCounts {
+  provider?: string;
+  model: string;
+  usageKnown: boolean;
+  costUsd?: number;
+  costKnown: boolean;
+}
+
+export interface InvocationUsage extends UsageTokenCounts {
+  costUsd?: number;
+  costIncomplete: boolean;
+  steps: UsageStep[];
+}
+
+export interface UsagePriceOverride {
+  provider?: string;
+  model: string;
+  inputPerMillionTokens: number;
+  outputPerMillionTokens: number;
+  cacheReadPerMillionTokens?: number;
+  cacheWritePerMillionTokens?: number;
+}
+
+export interface UsagePricingOptions {
+  providerId?: string;
+  overrides?: readonly UsagePriceOverride[];
+}
+
 export interface InvocationResult {
   invocationId: string;
   runId: string;
   text: string;
   messages: NeutralMessage[];
+  usage: InvocationUsage;
   provider?: string;
   model?: string;
 }

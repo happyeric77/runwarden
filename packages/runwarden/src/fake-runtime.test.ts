@@ -24,6 +24,15 @@ describe('FakeAgentRuntime', () => {
           content: 'Fake runtime response to: Hello',
         },
       ],
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costIncomplete: false,
+        steps: [],
+      },
       provider: 'fake',
       model: 'fake-agent-runtime',
     });
