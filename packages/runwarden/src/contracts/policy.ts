@@ -49,10 +49,15 @@ export interface PolicyDecision {
 export type BudgetLimitKind = 'costUsd' | 'tokens';
 export type BudgetCompleteness = 'complete' | 'lower_bound';
 
+export interface BudgetGrant {
+  maxCostUsd?: number;
+  maxTokens?: number;
+}
+
 export interface RuntimeBudgetPolicy {
   maxCostUsd?: number;
   maxTokens?: number;
-  onExceeded?: 'stop' | 'log';
+  onExceeded?: 'stop' | 'log' | 'approve';
 }
 
 export interface BudgetWarning {
@@ -97,8 +102,14 @@ export interface RuntimePolicies {
    * a limit completes (including its tool side effects), and only the next model
    * call is prevented. A crossing on a final text step is recorded but still
    * returns the answer. `maxCostUsd` is only enforceable when every step's cost
-   * is known; token limits use known token counts as a lower bound. Budget stops
-   * are final and are not retried.
+   * is known; token limits use known token counts as a lower bound.
+   *
+   * `stop` fails the invocation with `budget_exceeded` and no retry. `log` only
+   * records crossings. `approve` parks a durable invocation in
+   * `awaiting_approval` so a human can grant additional quota; a resumed run
+   * executes again from the start (completed tool side effects can repeat) under
+   * `configured limit + accumulated grants`. Direct execution has no approval
+   * state machine and degrades `approve` to `stop`.
    */
   budget?: RuntimeBudgetPolicy;
 }

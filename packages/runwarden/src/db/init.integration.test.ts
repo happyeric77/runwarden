@@ -26,11 +26,13 @@ describe('initDb', () => {
         '0000_init.sql',
         '0001_invocation_result_messages.sql',
         '0002_invocation_usage.sql',
+        '0003_invocation_budget_approval.sql',
       ]);
       expect(results.flatMap((result) => result.alreadyApplied)).toEqual([
         '0000_init.sql',
         '0001_invocation_result_messages.sql',
         '0002_invocation_usage.sql',
+        '0003_invocation_budget_approval.sql',
       ]);
     } finally {
       await other.close();
@@ -54,11 +56,12 @@ describe('initDb', () => {
       '0000_init.sql',
       '0001_invocation_result_messages.sql',
       '0002_invocation_usage.sql',
+      '0003_invocation_budget_approval.sql',
     ]);
 
     const ledger = await handle.pool.query<{ count: string }>(
       'select count(*)::text as count from agent_runtime.schema_migrations',
     );
-    expect(ledger.rows[0]?.count).toBe('3');
+    expect(ledger.rows[0]?.count).toBe('4');
   });
 });

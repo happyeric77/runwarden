@@ -2,12 +2,14 @@ import { AgentRuntimeError } from '../contracts/errors.js';
 import type {
   BudgetCompleteness,
   BudgetExceededLimit,
+  BudgetGrant,
   BudgetLimitKind,
   BudgetWarningEvent,
   PolicyDecision,
   RuntimePolicies,
 } from '../contracts/policy.js';
 import type { InvocationUsage, PendingToolCall } from '../contracts/runtime.js';
+import { effectiveBudgetLimits, validateBudgetGrant } from './budget.js';
 import { canonicalJson } from './canonical-json.js';
 import { usageStepsOverflow } from './usage.js';
 
@@ -32,7 +34,7 @@ type PolicyRuling = Omit<PolicyDecision, 'scope' | 'invocationId' | 'runId'>;
 interface ValidatedBudget {
   maxCostUsd?: number;
   maxTokens?: number;
-  onExceeded: 'stop' | 'log';
+  onExceeded: 'stop' | 'log' | 'approve';
 }
 
 interface PolicyEngineHooks {
@@ -40,6 +42,9 @@ interface PolicyEngineHooks {
   onBudgetWarning?: (warning: BudgetWarningEvent) => void;
   correctionForInvalidCall?: (call: ParsedToolCall) => string | undefined;
   approvedToolCall?: PendingToolCall;
+  budgetGrants?: BudgetGrant;
+  /** Only the durable path can park a budget crossing for approval. */
+  budgetParkable?: boolean;
 }
 
 const BUDGET_TOKEN_FIELDS = [
@@ -52,11 +57,16 @@ const BUDGET_TOKEN_FIELDS = [
 
 function validateBudget(
   budget: RuntimePolicies['budget'],
+  grants: BudgetGrant | undefined,
 ): ValidatedBudget | undefined {
   if (!budget) return undefined;
   const onExceeded = budget.onExceeded ?? 'stop';
-  if (onExceeded !== 'stop' && onExceeded !== 'log') {
-    throw new Error("budget.onExceeded must be 'stop' or 'log'");
+  if (
+    onExceeded !== 'stop' &&
+    onExceeded !== 'log' &&
+    onExceeded !== 'approve'
+  ) {
+    throw new Error("budget.onExceeded must be 'stop', 'log', or 'approve'");
   }
   if (budget.maxCostUsd === undefined && budget.maxTokens === undefined) {
     throw new Error('budget requires maxCostUsd or maxTokens');
@@ -73,11 +83,10 @@ function validateBudget(
   ) {
     throw new Error('budget.maxTokens must be a positive integer');
   }
+  const validatedGrants =
+    grants === undefined ? undefined : validateBudgetGrant(grants, budget);
   return {
-    ...(budget.maxCostUsd !== undefined
-      ? { maxCostUsd: budget.maxCostUsd }
-      : {}),
-    ...(budget.maxTokens !== undefined ? { maxTokens: budget.maxTokens } : {}),
+    ...effectiveBudgetLimits(budget, validatedGrants),
     onExceeded,
   };
 }
@@ -102,6 +111,8 @@ export class PolicyEngine {
   private readonly correctionBudget: number;
   private readonly maxToolCallsPerInvocation: number;
   private readonly budget?: ValidatedBudget;
+  private readonly budgetParkable: boolean;
+  private readonly budgetGrants?: BudgetGrant;
   private readonly budgetWarned: Record<BudgetLimitKind, boolean> = {
     tokens: false,
     costUsd: false,
@@ -130,7 +141,9 @@ export class PolicyEngine {
     this.exactlyOne = policies.exactlyOneToolCallPerStep ?? true;
     this.correctionBudget = policies.correctionBudget ?? 1;
     this.maxToolCallsPerInvocation = policies.maxToolCallsPerInvocation ?? 8;
-    this.budget = validateBudget(policies.budget);
+    this.budgetGrants = hooks.budgetGrants;
+    this.budgetParkable = hooks.budgetParkable ?? false;
+    this.budget = validateBudget(policies.budget, hooks.budgetGrants);
     this.approvedToolCall = hooks.approvedToolCall;
     for (const [name, value] of [
       ['correctionBudget', this.correctionBudget],
@@ -485,7 +498,7 @@ export class PolicyEngine {
     );
     if (
       exceeded.length > 0 &&
-      budget.onExceeded === 'stop' &&
+      budget.onExceeded !== 'log' &&
       canContinue &&
       !existingTerminal
     ) {
@@ -493,16 +506,35 @@ export class PolicyEngine {
         this.terminal?.diagnostics.code === 'audit_persistence_failed'
           ? this.terminal.message
           : undefined;
-      this.terminal = new AgentRuntimeError(
-        'budget',
-        'Invocation budget exceeded',
-        {
-          code: 'budget_exceeded',
-          limits: exceeded,
-          ...(auditFailure ? { auditFailure } : {}),
+      const detail = {
+        limits: exceeded,
+        effectiveLimits: {
+          ...(budget.maxTokens !== undefined
+            ? { maxTokens: budget.maxTokens }
+            : {}),
+          ...(budget.maxCostUsd !== undefined
+            ? { maxCostUsd: budget.maxCostUsd }
+            : {}),
         },
-        { usage },
-      );
+        ...(this.budgetGrants ? { grants: this.budgetGrants } : {}),
+        ...(auditFailure ? { auditFailure } : {}),
+      };
+      if (budget.onExceeded === 'approve' && this.budgetParkable) {
+        this.terminal = new AgentRuntimeError(
+          'budget',
+          'Budget approval required',
+          { code: 'budget_approval_required', ...detail },
+          { usage },
+        );
+      } else {
+        // Direct execution has no approval state machine: degrade to stop.
+        this.terminal = new AgentRuntimeError(
+          'budget',
+          'Invocation budget exceeded',
+          { code: 'budget_exceeded', ...detail },
+          { usage },
+        );
+      }
     }
   }
 

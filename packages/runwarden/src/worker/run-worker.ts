@@ -2,11 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 
 import { AgentRuntimeError } from '../contracts/errors.js';
-import type { PolicyDecision } from '../contracts/policy.js';
+import type {
+  BudgetExceededLimit,
+  PolicyDecision,
+} from '../contracts/policy.js';
 import type {
   AgentRuntime,
+  AwaitingApprovalRequest,
+  BudgetRequest,
   InvocationRecord,
   InvocationResult,
+  InvocationUsage,
   PendingToolCall,
 } from '../contracts/runtime.js';
 import type { DatabaseHandle } from '../db/client.js';
@@ -20,6 +26,7 @@ import {
   markInvocationSucceeded,
   toPendingToolCall,
   toRecord,
+  type ParkRequest,
 } from '../db/repositories/invocations.js';
 import {
   claimToolCallAudit,
@@ -50,7 +57,7 @@ export interface RunWorkerOptions {
   ) => Promise<void>;
   onAwaitingApproval?: (
     invocation: InvocationRecord,
-    pendingToolCall: PendingToolCall,
+    request: AwaitingApprovalRequest,
   ) => Promise<void>;
 }
 
@@ -83,6 +90,36 @@ function pendingFromError(error: AgentRuntimeError): PendingToolCall {
     toolName: typeof toolName === 'string' ? toolName : 'unknown',
     input: undefined,
   };
+}
+
+function budgetRequestFromError(
+  error: AgentRuntimeError,
+  runId: string,
+): BudgetRequest | undefined {
+  const limits = error.diagnostics.limits;
+  if (!Array.isArray(limits) || !error.usage) return undefined;
+  return {
+    requestId: runId,
+    limits: limits as BudgetExceededLimit[],
+    usage: error.usage,
+  };
+}
+
+function auditFailureError(
+  cause: unknown,
+  usage: InvocationUsage | undefined,
+  nonRetryable = false,
+): AgentRuntimeError {
+  return new AgentRuntimeError(
+    'failure',
+    'Policy audit persistence failed',
+    {
+      code: 'audit_persistence_failed',
+      auditFailure: 'Policy audit persistence failed',
+      ...(nonRetryable ? { retryable: false } : {}),
+    },
+    { cause, ...(usage ? { usage } : {}) },
+  );
 }
 
 export function runWorker(options: RunWorkerOptions): WorkerHandle {
@@ -194,6 +231,8 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           invocationId: String(row.id),
           runId: row.activeRunId!,
           approvedToolCall: toPendingToolCall(row.pendingToolCall),
+          ...(row.budgetGrants ? { budgetGrants: row.budgetGrants } : {}),
+          budgetParkable: true,
         });
       } catch (error) {
         invocationError = error;
@@ -207,16 +246,17 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
           invocationError === undefined
             ? undefined
             : toAgentError(invocationError);
-        if (budgetError && errorCode(budgetError) === 'budget_exceeded') {
+        const code = budgetError ? errorCode(budgetError) : undefined;
+        if (budgetError && code === 'budget_exceeded') {
           budgetError.diagnostics.auditFailure =
             'Policy audit persistence failed';
           throw budgetError;
         }
-        throw new AgentRuntimeError(
-          'failure',
-          'Policy audit persistence failed',
-          { code: 'audit_persistence_failed' },
-          { cause: auditError },
+        // A park is only published with its durable audit; never park unaudited.
+        throw auditFailureError(
+          auditError,
+          budgetError?.usage,
+          code === 'budget_approval_required',
         );
       }
       if (invocationError !== undefined) throw invocationError;
@@ -268,38 +308,105 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     } catch (error) {
       if (lease.isLost) return;
       const agentError = toAgentError(error);
-      if (errorCode(agentError) === 'approval_required') {
+      const code = errorCode(agentError);
+      if (code === 'approval_required') {
         const pendingToolCall = pendingFromError(agentError);
-        const parked = await markInvocationAwaitingApproval(
-          db,
-          row.id,
-          workerId,
-          row.activeRunId!,
-          pendingToolCall,
-        );
+        const parked = await park(row, lease, {
+          kind: 'tool',
+          toolCall: pendingToolCall,
+        });
         if (parked) {
-          await options.onAwaitingApproval?.(toRecord(parked), pendingToolCall);
+          await options.onAwaitingApproval?.(parked, {
+            kind: 'tool',
+            toolCall: pendingToolCall,
+          });
         }
         return;
       }
-      const updated = await markInvocationFailed(
-        db,
-        row.id,
-        workerId,
-        row.activeRunId!,
-        { code: errorCode(agentError), message: agentError.message },
-        retryDelayMs,
-        {
-          ...(agentError.usage ? { usage: agentError.usage } : {}),
-          ...(errorCode(agentError) === 'budget_exceeded'
-            ? { retryable: false }
+      if (code === 'budget_approval_required') {
+        const budgetRequest = budgetRequestFromError(
+          agentError,
+          row.activeRunId!,
+        );
+        if (!budgetRequest) {
+          await settleFailure(row, agentError);
+          return;
+        }
+        const detail = {
+          ...(agentError.diagnostics.effectiveLimits
+            ? { effectiveLimits: agentError.diagnostics.effectiveLimits }
             : {}),
-        },
-      );
-      if (updated?.status === 'failed') {
-        await internals?.notifyInvocationSettled?.(toRecord(updated));
-        await options.onFailed?.(toRecord(updated), agentError);
+          ...(agentError.diagnostics.grants
+            ? { grants: agentError.diagnostics.grants }
+            : {}),
+        };
+        let parked: InvocationRecord | undefined;
+        try {
+          parked = await park(row, lease, {
+            kind: 'budget',
+            request: budgetRequest,
+            detail,
+          });
+        } catch (parkError) {
+          await settleFailure(
+            row,
+            auditFailureError(parkError, agentError.usage),
+            true,
+          );
+          return;
+        }
+        if (parked) {
+          await options.onAwaitingApproval?.(parked, {
+            kind: 'budget',
+            budgetRequest,
+          });
+        }
+        return;
       }
+      await settleFailure(row, agentError);
+    }
+  }
+
+  async function park(
+    row: InvocationRow,
+    lease: ReturnType<typeof guardLease>,
+    request: ParkRequest,
+  ): Promise<InvocationRecord | undefined> {
+    if (lease.isLost) return undefined;
+    const parked = await markInvocationAwaitingApproval(
+      db,
+      row.id,
+      workerId,
+      row.activeRunId!,
+      request,
+    );
+    return parked ? toRecord(parked) : undefined;
+  }
+
+  async function settleFailure(
+    row: InvocationRow,
+    agentError: AgentRuntimeError,
+    nonRetryable = false,
+  ): Promise<void> {
+    const updated = await markInvocationFailed(
+      db,
+      row.id,
+      workerId,
+      row.activeRunId!,
+      { code: errorCode(agentError), message: agentError.message },
+      retryDelayMs,
+      {
+        ...(agentError.usage ? { usage: agentError.usage } : {}),
+        ...(nonRetryable ||
+        agentError.diagnostics.retryable === false ||
+        errorCode(agentError) === 'budget_exceeded'
+          ? { retryable: false }
+          : {}),
+      },
+    );
+    if (updated?.status === 'failed') {
+      await internals?.notifyInvocationSettled?.(toRecord(updated));
+      await options.onFailed?.(toRecord(updated), agentError);
     }
   }
 

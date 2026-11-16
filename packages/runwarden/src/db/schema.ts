@@ -12,8 +12,13 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-import type { PolicyDecisionKind, PolicyRule } from '../contracts/policy.js';
 import type {
+  BudgetGrant,
+  PolicyDecisionKind,
+  PolicyRule,
+} from '../contracts/policy.js';
+import type {
+  BudgetRequest,
   InvocationInput,
   InvocationStatus,
   NeutralMessage,
@@ -106,6 +111,10 @@ export const invocations = runtimeSchema.table(
       mode: 'date',
     }),
     pendingToolCall: jsonb('pending_tool_call'),
+    pendingBudgetRequest: jsonb(
+      'pending_budget_request',
+    ).$type<BudgetRequest>(),
+    budgetGrants: jsonb('budget_grants').$type<BudgetGrant>(),
     startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
     completedAt: timestamp('completed_at', {
       withTimezone: true,

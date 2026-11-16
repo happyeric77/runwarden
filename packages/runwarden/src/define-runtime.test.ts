@@ -279,3 +279,63 @@ it('generates a fresh UUID runId per direct invocation by default', async () => 
   expect(first.runId).not.toBe(second.runId);
   expect(openedRunIds).toEqual([first.runId, second.runId]);
 });
+
+it.each(['runtime', 'engine'] as const)(
+  'degrades budget approval to a stop on direct %s execution',
+  async (path) => {
+    let modelCalls = 0;
+    const runtime = api.defineRuntime({
+      model: new MockLanguageModelV4({
+        modelId: 'mock-model',
+        doGenerate: async () => {
+          modelCalls += 1;
+          return {
+            content: [
+              {
+                type: 'tool-call',
+                toolCallId: 'call-note',
+                toolName: 'notes__get',
+                input: '{}',
+              },
+            ] as never,
+            finishReason: { unified: 'tool-calls', raw: 'tool_calls' } as const,
+            usage: {
+              inputTokens: {
+                total: 6,
+                noCache: 6,
+                cacheRead: undefined,
+                cacheWrite: undefined,
+              },
+              outputTokens: { total: 5, text: 5, reasoning: undefined },
+            },
+            warnings: [],
+          };
+        },
+      }),
+      tools: noteTools,
+      mcpClient: recordingMcpClient([]),
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+
+    const input = { scope: 'scope-a', prompt: 'Get a note' };
+    const error = await (
+      path === 'runtime'
+        ? runtime.invoke(input)
+        : runtime.engine.invoke({
+            ...input,
+            invocationId: 'inv-direct',
+            runId: 'run-direct',
+          })
+    ).catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_exceeded',
+        limits: [{ limitKind: 'tokens', accumulated: 11, limit: 10 }],
+      },
+      usage: { inputTokens: 6, outputTokens: 5 },
+    });
+    expect(modelCalls).toBe(1);
+  },
+);
