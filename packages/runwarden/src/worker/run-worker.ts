@@ -214,6 +214,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         row.activeRunId!,
         {
           resultText: result.text,
+          resultMessages: result.messages,
           provider: result.provider,
           model: result.model,
         },

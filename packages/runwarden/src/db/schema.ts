@@ -15,6 +15,7 @@ import type { PolicyDecisionKind, PolicyRule } from '../contracts/policy.js';
 import type {
   InvocationInput,
   InvocationStatus,
+  NeutralMessage,
 } from '../contracts/runtime.js';
 
 export const runtimeSchema = pgSchema('agent_runtime');
@@ -61,6 +62,7 @@ export const invocations = runtimeSchema.table(
     orderingKey: text('ordering_key'),
     input: jsonb('input').$type<InvocationInput>().notNull(),
     resultText: text('result_text'),
+    resultMessages: jsonb('result_messages').$type<NeutralMessage[]>(),
     idempotencyKey: text('idempotency_key'),
     status: invocationStatusEnum('status')
       .notNull()

@@ -595,6 +595,154 @@ describe('durable defineRuntime', () => {
       await worker.stop();
     }
   });
+
+  it('persists invocation messages and returns them from a durable result', async () => {
+    const listResult =
+      '[{"type":"text","text":"1: booking one, 2: booking two"}]';
+    const fakeMcpClient: McpToolClient = {
+      async open() {
+        return {
+          async callTool() {
+            return listResult;
+          },
+          async close() {},
+        };
+      },
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        });
+        if (promptText.includes('1: booking one')) {
+          return finish([{ type: 'text', text: 'Found two bookings.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'list-durable',
+            toolName: 'tasks__list_scheduled',
+            input: JSON.stringify({ query_mode: 'upcoming' }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: fakeMcpClient,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-messages', prompt: 'List my tasks' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+      expect(result.messages).toEqual([
+        { role: 'user', content: 'List my tasks' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'list-durable',
+              toolName: 'tasks__list_scheduled',
+              input: { query_mode: 'upcoming' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'list-durable',
+              toolName: 'tasks__list_scheduled',
+              output: { type: 'text', value: listResult },
+            },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Found two bookings.' }],
+        },
+      ]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('returns no messages for a row stored before result_messages existed', async () => {
+    const runtime = defineRuntime({
+      db: handle,
+      model: new MockLanguageModelV4({
+        doGenerate: async () => ({
+          content: [{ type: 'text', text: 'unused' }] as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: {
+            inputTokens: {
+              total: 1,
+              noCache: 1,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        }),
+      }),
+    });
+    const { invocationId } = await runtime.enqueue({
+      scope: 'scope-durable-legacy',
+      prompt: 'legacy invocation',
+    });
+    const { claimed } = await claimInvocations(handle.db, 'legacy-worker', {
+      leaseTimeoutMs: 30_000,
+      maxBatchSize: 1,
+    });
+    const row = claimed.find((entry) => String(entry.id) === invocationId);
+    expect(row).toBeDefined();
+    await markInvocationSucceeded(
+      handle.db,
+      Number(invocationId),
+      'legacy-worker',
+      row!.activeRunId!,
+      { resultText: 'legacy result' },
+    );
+
+    const result = await runtime.waitForInvocation(invocationId, {
+      pollIntervalMs: 10,
+      waitTimeoutMs: 1_000,
+    });
+    expect(result.text).toBe('legacy result');
+    expect(result.messages).toEqual([]);
+  });
 });
 
 describe('approval state machine', () => {

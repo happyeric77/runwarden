@@ -1,0 +1,1 @@
+ALTER TABLE "agent_runtime"."invocations" ADD COLUMN "result_messages" jsonb;
