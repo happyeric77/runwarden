@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import type {
   InvocationInput,
   InvocationRecord,
+  NeutralMessage,
   PendingToolCall,
 } from '../../contracts/runtime.js';
 import type { Database } from '../client.js';
@@ -17,6 +18,7 @@ export function mapRow(raw: Record<string, unknown>): InvocationRow {
     orderingKey: (raw.ordering_key as string | null) ?? null,
     input: raw.input as InvocationInput,
     resultText: (raw.result_text as string | null) ?? null,
+    resultMessages: (raw.result_messages as NeutralMessage[] | null) ?? null,
     idempotencyKey: (raw.idempotency_key as string | null) ?? null,
     status: raw.status as InvocationRow['status'],
     attemptCount: Number(raw.attempt_count),
@@ -237,12 +239,18 @@ export async function markInvocationSucceeded(
   id: number,
   workerId: string,
   runId: string,
-  result: { resultText: string; provider?: string; model?: string },
+  result: {
+    resultText: string;
+    resultMessages?: NeutralMessage[];
+    provider?: string;
+    model?: string;
+  },
 ): Promise<boolean> {
   const updated = await db.execute(sql`
     update agent_runtime.invocations
     set status = 'succeeded',
         result_text = ${result.resultText},
+        result_messages = ${result.resultMessages ? JSON.stringify(result.resultMessages) : null}::jsonb,
         provider = ${result.provider ?? null},
         model = ${result.model ?? null},
         pending_tool_call = null,
