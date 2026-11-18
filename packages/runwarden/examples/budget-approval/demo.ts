@@ -75,6 +75,7 @@ const model = new MockLanguageModelV4({
   provider: 'demo-provider',
   modelId: 'demo-model',
   doGenerate: async ({ prompt }) => {
+    await pause();
     const hasToolResult = prompt.some((message) => message.role === 'tool');
     if (!hasToolResult) {
       logStep(1, 6, 5);
@@ -137,10 +138,12 @@ async function waitForEnter() {
   process.stdout.write(
     `[approved] Press Enter to approve request with grant maxTokens=${grantTokens}... `,
   );
+  process.stdin.setEncoding('utf8');
+  process.stdin.resume();
   await new Promise<void>((resolve) => {
-    process.stdin.resume();
     process.stdin.once('data', () => resolve());
   });
+  process.stdin.pause();
 }
 
 async function main() {
@@ -232,6 +235,7 @@ async function main() {
           {
             scope,
             prompt: 'Summarize the November ledger.',
+            orderingKey: 'november-ledger',
             maxAttempts: 1,
           },
           { waitTimeoutMs: 30_000, pollIntervalMs: 100 },
@@ -270,11 +274,12 @@ async function main() {
 
       if (auto) {
         console.log(
-          `[approved] --auto: approving in ${Math.max(pauseMs, 0)}ms with ` +
+          `[approved] --auto: approving after ${Math.max(pauseMs, 0)}ms with ` +
             `grant maxTokens=${grantTokens}`,
         );
         await pause();
       } else {
+        await pause();
         await waitForEnter();
       }
 

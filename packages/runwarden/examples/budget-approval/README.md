@@ -33,7 +33,8 @@ Or approve interactively by pressing Enter:
 pnpm exec tsx examples/budget-approval/demo.ts
 ```
 
-`DEMO_PAUSE_MS` controls the `--auto` pause (default `1200`).
+`DEMO_PAUSE_MS` controls the pause between model steps and before approval
+(default `1200`). Set it to `0` to remove the pauses.
 
 ## What you should see
 
@@ -48,7 +49,7 @@ pnpm exec tsx examples/budget-approval/demo.ts
 [parked] invocation <id> status=awaiting_approval requestId=<run-id>
 [parked] tokens: accumulated=11 limit=10 step=1
 [parked] usage snapshot: input=6 output=5 total=11
-[approved] --auto: approving in 1200ms with grant maxTokens=15
+[approved] --auto: approving after 1200ms with grant maxTokens=15
 [approved] granted +15 tokens; effective limit is now 25. The worker resumes as a fresh run.
 [run] step 1: +6 input, +5 output; cumulative 11/25 tokens
 [run] tool ledger__summarize executed via fake MCP
