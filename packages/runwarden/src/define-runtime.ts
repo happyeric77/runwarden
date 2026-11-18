@@ -4,6 +4,7 @@ import type { LanguageModel } from 'ai';
 
 import { AgentRuntimeError } from './contracts/errors.js';
 import type {
+  BudgetWarning,
   McpServerConfig,
   PolicyDecision,
   RuntimePolicies,
@@ -16,12 +17,14 @@ import type {
   InvocationRecord,
   InvocationResult,
   InvocationSettledListener,
+  InvocationUsage,
   McpToolClient,
   McpToolSession,
   RuntimeMetrics,
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
 } from './contracts/runtime.js';
 import type { DatabaseHandle } from './db/client.js';
 import {
@@ -32,15 +35,18 @@ import {
 import {
   enqueueInvocation,
   getInvocationRowById,
+  toBudgetRequest,
   toPendingToolCall,
   toRecord,
 } from './db/repositories/invocations.js';
+import type { InvocationRow } from './db/schema.js';
 import { NativeMcpClient } from './mcp/native-mcp-client.js';
 import { AiSdkNativeRuntime } from './runtime/ai-sdk-runtime.js';
 import {
   openAiCompatible,
   type OpenAiCompatibleModelConfig,
 } from './runtime/model.js';
+import { emptyInvocationUsage, usageStepsOverflow } from './runtime/usage.js';
 
 export type { DatabaseHandle } from './db/client.js';
 
@@ -56,6 +62,25 @@ export interface RuntimeInternals {
   generateRunId?: () => string;
 }
 
+function usageFromRow(row: InvocationRow): InvocationUsage {
+  if (!row.usageSteps) {
+    return { ...emptyInvocationUsage(), costIncomplete: true };
+  }
+  return {
+    inputTokens: row.inputTokens ?? 0,
+    outputTokens: row.outputTokens ?? 0,
+    cacheReadTokens: row.cacheReadTokens ?? 0,
+    cacheWriteTokens: row.cacheWriteTokens ?? 0,
+    reasoningTokens: row.reasoningTokens ?? 0,
+    ...(row.costUsd === null ? {} : { costUsd: row.costUsd }),
+    costIncomplete:
+      row.usageSteps.some((step) => !step.costKnown) ||
+      (row.usageSteps.some((step) => step.costKnown) && row.costUsd === null) ||
+      usageStepsOverflow(row.usageSteps),
+    steps: row.usageSteps,
+  };
+}
+
 export interface DefineRuntimeOptions {
   db?: DatabaseHandle;
   model?: LanguageModel;
@@ -66,8 +91,10 @@ export interface DefineRuntimeOptions {
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
   policies?: RuntimePolicies;
+  pricing?: UsagePricingOptions;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  onBudgetWarning?: (warning: BudgetWarning) => void;
   onToolCallAudit?: ToolCallAuditSink;
   onInvocationSettled?: InvocationSettledListener;
   generateRunId?: () => string;
@@ -197,11 +224,13 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     loadSystemPrompt: options.loadSystemPrompt,
     loadHistory: options.loadHistory,
     policies: options.policies,
+    pricing: options.pricing,
     onMetrics: options.onMetrics,
     onPolicyDecision: (decision) => {
       for (const listener of decisionListeners) listener(decision);
       options.onPolicyDecision?.(decision);
     },
+    onBudgetWarning: options.onBudgetWarning,
     onToolCallAudit: async (event) => {
       // Persistence listeners run first; their failure fails the call.
       for (const listener of auditListeners) await listener(event);
@@ -247,12 +276,14 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
           runId: row.activeRunId!,
           text: row.resultText ?? '',
           messages: row.resultMessages ?? [],
+          usage: usageFromRow(row),
           provider: row.provider ?? undefined,
           model: row.model ?? undefined,
         };
       }
       if (row.status === 'awaiting_approval') {
         const pending = toPendingToolCall(row.pendingToolCall);
+        const budgetRequest = toBudgetRequest(row.pendingBudgetRequest);
         throw new AgentRuntimeError(
           'failure',
           `Invocation ${invocationId} is awaiting approval`,
@@ -260,10 +291,23 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
             code: 'approval_required',
             invocationId,
             ...(pending ? { toolName: pending.toolName } : {}),
+            ...(budgetRequest ? { budgetRequest } : {}),
           },
         );
       }
       if (row.status === 'failed' || row.status === 'cancelled') {
+        if (row.lastErrorCode === 'budget_exceeded') {
+          throw new AgentRuntimeError(
+            'budget',
+            row.lastErrorMessage ?? 'Invocation budget exceeded',
+            {
+              code: 'budget_exceeded',
+              invocationId,
+              runId: row.activeRunId!,
+            },
+            { usage: usageFromRow(row) },
+          );
+        }
         throw new AgentRuntimeError(
           'failure',
           row.lastErrorMessage ?? `Invocation ${row.status}`,
@@ -300,12 +344,25 @@ export function defineRuntime(options: DefineRuntimeOptions): Runtime {
     opts?: ApprovalActionOptions,
   ): Promise<InvocationRecord> {
     if (!db) throw dbRequired(`${resolution} resolution`);
-    const result = await resolveInvocationApproval(db.db, id, resolution, opts);
+    const result = await resolveInvocationApproval(
+      db.db,
+      id,
+      resolution,
+      opts,
+      options.policies?.budget,
+    );
     if (result.outcome === 'not_found') {
       throw new AgentRuntimeError('failure', `Invocation ${id} was not found`, {
         code: 'invocation_not_found',
         invocationId: id,
       });
+    }
+    if (result.outcome === 'stale_request') {
+      throw new AgentRuntimeError(
+        'failure',
+        `Invocation ${id} has a newer pending approval request`,
+        { code: 'approval_request_stale', invocationId: id },
+      );
     }
     if (result.outcome === 'not_awaiting') {
       throw new AgentRuntimeError(

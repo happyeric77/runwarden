@@ -50,6 +50,11 @@ per-call audit), with durable execution as the substrate underneath.
   through the library API. Approval reruns the whole invocation and
   only the exact approved call passes; rejection cancels it. Nothing
   sensitive executes unapproved.
+- **Usage budgets**: meter tokens and priced cost per step, warn at 80%, and
+  stop a runaway invocation at a cost or token limit, or park it so a human
+  can approve extra quota and let it continue. The crossing step finishes;
+  only the next model call is prevented. Budget stops persist their usage
+  and are not retried.
 - **Audit trail in Postgres**: invocations, policy decisions, and the latest
   dispatch state of each tool-call identity are queryable with plain SQL in
   `agent_runtime`. A call identity is its invocation, tool name, and canonical

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { RUN_ID_HEADER } from '../brand.js';
 import { AgentRuntimeError } from '../contracts/errors.js';
 import type {
+  BudgetWarning,
   PolicyDecision,
   RuntimePolicies,
   ToolDefinition,
@@ -16,6 +17,7 @@ import type {
   RuntimeMetrics,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
 } from '../contracts/runtime.js';
 import { AiSdkNativeRuntime, modelMessages } from './ai-sdk-runtime.js';
 import { deriveToolCallIdempotencyKey } from './canonical-json.js';
@@ -172,6 +174,18 @@ function textStep(text: string) {
   };
 }
 
+function metered<
+  T extends ReturnType<typeof toolStep> | ReturnType<typeof textStep>,
+>(step: T, inputTokens: number, outputTokens: number): T {
+  return {
+    ...step,
+    usage: {
+      inputTokens: { total: inputTokens, noCache: inputTokens },
+      outputTokens: { total: outputTokens, text: outputTokens },
+    },
+  };
+}
+
 function runtime(
   responses: Array<ReturnType<typeof toolStep> | ReturnType<typeof textStep>>,
   options: {
@@ -181,8 +195,10 @@ function runtime(
     onMetrics?: (metrics: RuntimeMetrics) => void;
     policies?: RuntimePolicies;
     onPolicyDecision?: (decision: PolicyDecision) => void;
+    onBudgetWarning?: (warning: BudgetWarning) => void;
     onToolCallAudit?: ToolCallAuditSink;
     toolError?: Error;
+    pricing?: UsagePricingOptions;
   } = {},
 ) {
   const model = new MockLanguageModelV4({
@@ -209,7 +225,9 @@ function runtime(
     now: options.now,
     onMetrics: options.onMetrics,
     onPolicyDecision: options.onPolicyDecision,
+    onBudgetWarning: options.onBudgetWarning,
     onToolCallAudit: options.onToolCallAudit,
+    pricing: options.pricing,
     policies: {
       ...options.policies,
       ...(options.maxToolCallsPerInvocation !== undefined
@@ -1006,6 +1024,38 @@ describe('AiSdkNativeRuntime', () => {
           content: [{ type: 'text', text: 'Record found' }],
         },
       ],
+      usage: {
+        inputTokens: 6,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costIncomplete: true,
+        steps: [
+          {
+            inputTokens: 3,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            provider: 'mock-provider',
+            model: 'mock-model',
+            usageKnown: true,
+            costKnown: false,
+          },
+          {
+            inputTokens: 3,
+            outputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            provider: 'mock-provider',
+            model: 'mock-model',
+            usageKnown: true,
+            costKnown: false,
+          },
+        ],
+      },
       provider: 'mock-provider',
       model: 'mock-model',
     });
@@ -1027,6 +1077,791 @@ describe('AiSdkNativeRuntime', () => {
     expect(JSON.stringify(subject.model.doGenerateCalls[1]?.prompt)).toContain(
       'ok',
     );
+  });
+
+  it('meters every step, including tool steps, into the invocation usage', async () => {
+    const richUsage = {
+      cachedInputTokens: undefined,
+      inputTokens: {
+        total: 10,
+        noCache: 4,
+        cacheRead: 3,
+        cacheWrite: 3,
+      },
+      outputTokens: { total: 6, text: 4, reasoning: 2 },
+    } as unknown as typeof usage;
+    const subject = runtime(
+      [
+        {
+          content: [toolCall('call-1', directoryTools.get, { recordId: 7 })],
+          finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' },
+          usage: richUsage,
+          warnings: [],
+        },
+        {
+          content: [{ type: 'text' as const, text: 'Record found' }],
+          finishReason: { unified: 'stop' as const, raw: 'stop' },
+          usage: richUsage,
+          warnings: [],
+        },
+      ],
+      {
+        pricing: {
+          overrides: [
+            {
+              model: 'mock-model',
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 2,
+              cacheReadPerMillionTokens: 0.5,
+              cacheWritePerMillionTokens: 0.25,
+            },
+          ],
+        },
+      },
+    );
+
+    const result = await subject.instance.invoke(invocation);
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 8,
+      outputTokens: 8,
+      cacheReadTokens: 6,
+      cacheWriteTokens: 6,
+      reasoningTokens: 4,
+      costIncomplete: false,
+    });
+    expect(result.usage.costUsd).toBeCloseTo(0.0000365, 12);
+    expect(result.usage.steps).toHaveLength(2);
+    for (const step of result.usage.steps) {
+      expect(step).toMatchObject({
+        inputTokens: 4,
+        outputTokens: 4,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 3,
+        reasoningTokens: 2,
+        provider: 'mock-provider',
+        model: 'mock-model',
+        usageKnown: true,
+        costKnown: true,
+      });
+      expect(step.costUsd).toBeCloseTo(0.00001825, 12);
+    }
+  });
+
+  it('warns once at exactly 80 percent without stopping', async () => {
+    const decisions: PolicyDecision[] = [];
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime([metered(textStep('Done'), 8, 0)], {
+      policies: { budget: { maxTokens: 10 } },
+      onPolicyDecision: (decision) => decisions.push(decision),
+      onBudgetWarning: (warning) => warnings.push(warning),
+    });
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(warnings).toEqual([
+      {
+        scope: 'scope-a',
+        invocationId: 'inv-1',
+        runId: '00000000-0000-4000-8000-000000000001',
+        limitKind: 'tokens',
+        accumulated: 8,
+        limit: 10,
+        threshold: 0.8,
+        stepNumber: 1,
+        completeness: 'complete',
+      },
+    ]);
+    expect(
+      decisions.filter((decision) => decision.decision === 'warning'),
+    ).toHaveLength(1);
+    expect(
+      decisions.filter((decision) => decision.decision === 'exceeded'),
+    ).toHaveLength(0);
+  });
+
+  it('records warning then exceeded when one final step reaches the limit', async () => {
+    const decisions: PolicyDecision[] = [];
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime([metered(textStep('Done'), 10, 0)], {
+      policies: { budget: { maxTokens: 10 } },
+      onPolicyDecision: (decision) => decisions.push(decision),
+      onBudgetWarning: (warning) => warnings.push(warning),
+    });
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(warnings).toHaveLength(1);
+    expect(decisions.map((decision) => decision.decision)).toEqual([
+      'warning',
+      'exceeded',
+    ]);
+    expect(decisions[1]?.detail).toMatchObject({
+      event: 'exceeded',
+      terminal: 'final_step',
+      accumulated: 10,
+    });
+  });
+
+  it('stops when a text-only correction response reaches the budget', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('correction-a', directoryTools.get, { recordId: 1 }),
+            toolCall('correction-b', directoryTools.get, { recordId: 2 }),
+          ),
+          1,
+          0,
+        ),
+        metered(textStep('Still correcting'), 0, 9),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          budget: { maxTokens: 10 },
+          correctionBudget: 2,
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: { code: 'budget_exceeded' },
+      usage: { inputTokens: 1, outputTokens: 9 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
+    expect(subject.callTool).not.toHaveBeenCalled();
+    expect(
+      decisions
+        .filter((decision) => decision.rule === 'budget')
+        .map((decision) => decision.decision),
+    ).toEqual(['warning', 'exceeded']);
+    expect(decisions.at(-1)?.detail).not.toHaveProperty('terminal');
+  });
+
+  it('stops from valid input tokens when output usage is invalid', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('invalid-output', directoryTools.get, { recordId: 7 }),
+          ),
+          20,
+          Number.NaN,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10 } } },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_exceeded',
+        limits: [
+          {
+            limitKind: 'tokens',
+            accumulated: 20,
+            limit: 10,
+            stepNumber: 1,
+            completeness: 'lower_bound',
+          },
+        ],
+      },
+      usage: {
+        inputTokens: 20,
+        outputTokens: 0,
+        costIncomplete: true,
+        steps: [
+          {
+            inputTokens: 20,
+            outputTokens: 0,
+            usageKnown: false,
+            costKnown: false,
+          },
+        ],
+      },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops before the next provider call when a tool step reaches the token budget', async () => {
+    const decisions: PolicyDecision[] = [];
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('budget-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: { budget: { maxTokens: 10 } },
+        onPolicyDecision: (decision) => decisions.push(decision),
+        onBudgetWarning: (warning) => warnings.push(warning),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(AgentRuntimeError);
+    expect(error).toMatchObject({
+      kind: 'budget',
+      message: 'Invocation budget exceeded',
+      diagnostics: {
+        code: 'budget_exceeded',
+        invocationId: 'inv-1',
+        runId: '00000000-0000-4000-8000-000000000001',
+      },
+      usage: { inputTokens: 11, outputTokens: 0 },
+    });
+    expect(error.diagnostics.limits).toEqual([
+      {
+        limitKind: 'tokens',
+        accumulated: 11,
+        limit: 10,
+        stepNumber: 1,
+        completeness: 'complete',
+      },
+    ]);
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.callTool).toHaveBeenCalledTimes(1);
+    expect(warnings).toHaveLength(1);
+    expect(decisions.map((decision) => decision.decision)).toEqual([
+      'warning',
+      'exceeded',
+    ]);
+  });
+
+  it('reports both token and cost limits in one budget error', async () => {
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('both-1', directoryTools.get, { recordId: 7 })),
+          6,
+          5,
+        ),
+      ],
+      {
+        policies: {
+          budget: { maxTokens: 10, maxCostUsd: 0.000001 },
+        },
+        pricing: {
+          overrides: [
+            {
+              model: 'mock-model',
+              inputPerMillionTokens: 1,
+              outputPerMillionTokens: 1,
+            },
+          ],
+        },
+        onBudgetWarning: (warning) => warnings.push(warning),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(AgentRuntimeError);
+    expect(error.kind).toBe('budget');
+    expect(error.diagnostics.limits).toHaveLength(2);
+    expect(
+      (error.diagnostics.limits as Array<{ limitKind: string }>).map(
+        (limit) => limit.limitKind,
+      ),
+    ).toEqual(['tokens', 'costUsd']);
+    expect(warnings.map((warning) => warning.limitKind)).toEqual([
+      'tokens',
+      'costUsd',
+    ]);
+  });
+
+  it('logs one warning and one crossing per limit and keeps running', async () => {
+    const decisions: PolicyDecision[] = [];
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('log-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Done'), 1, 0),
+      ],
+      {
+        policies: { budget: { maxTokens: 10, onExceeded: 'log' } },
+        onPolicyDecision: (decision) => decisions.push(decision),
+        onBudgetWarning: (warning) => warnings.push(warning),
+      },
+    );
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
+    expect(warnings).toHaveLength(1);
+    expect(
+      decisions.filter((decision) => decision.decision === 'warning'),
+    ).toHaveLength(1);
+    expect(
+      decisions.filter((decision) => decision.decision === 'exceeded'),
+    ).toHaveLength(1);
+  });
+
+  it('never enforces a cost budget when cost is unknown', async () => {
+    const decisions: PolicyDecision[] = [];
+    const warnings: BudgetWarning[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('unknown-cost', directoryTools.get, { recordId: 7 }),
+          ),
+          1,
+          1,
+        ),
+        metered(textStep('Done'), 1, 1),
+      ],
+      {
+        policies: { budget: { maxCostUsd: 0.000001 } },
+        onPolicyDecision: (decision) => decisions.push(decision),
+        onBudgetWarning: (warning) => warnings.push(warning),
+      },
+    );
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
+    expect(warnings).toHaveLength(0);
+    expect(
+      decisions.filter((decision) => decision.decision === 'incomplete'),
+    ).toHaveLength(1);
+    expect(
+      decisions.find((decision) => decision.decision === 'incomplete')?.detail,
+    ).toMatchObject({
+      limitKind: 'costUsd',
+      accumulated: null,
+      reason: 'cost_unknown',
+    });
+  });
+
+  it('records incomplete token usage without treating it as a known zero', async () => {
+    const decisions: PolicyDecision[] = [];
+    const step = {
+      ...textStep('Done'),
+      usage: {
+        cachedInputTokens: undefined,
+        inputTokens: { total: undefined },
+        outputTokens: { total: undefined },
+      },
+    } as unknown as ReturnType<typeof textStep>;
+    const subject = runtime([step], {
+      policies: { budget: { maxTokens: 100 } },
+      onPolicyDecision: (decision) => decisions.push(decision),
+    });
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(
+      decisions.filter((decision) => decision.decision === 'incomplete'),
+    ).toHaveLength(1);
+    expect(
+      decisions.find((decision) => decision.decision === 'incomplete')?.detail,
+    ).toMatchObject({
+      limitKind: 'tokens',
+      reason: 'usage_incomplete',
+      completeness: 'lower_bound',
+    });
+  });
+
+  it('keeps a final answer and records an exceeded budget on the final text step', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime([metered(textStep('Done'), 12, 0)], {
+      policies: { budget: { maxTokens: 10 } },
+      onPolicyDecision: (decision) => decisions.push(decision),
+    });
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+    expect(
+      decisions.find((decision) => decision.decision === 'exceeded')?.detail,
+    ).toMatchObject({ terminal: 'final_step' });
+  });
+
+  it('does not let a throwing budget warning observer fail the invocation', async () => {
+    const subject = runtime([metered(textStep('Done'), 10, 0)], {
+      policies: { budget: { maxTokens: 10 } },
+      onBudgetWarning: () => {
+        throw new Error('observer failed');
+      },
+    });
+
+    await expect(subject.instance.invoke(invocation)).resolves.toMatchObject({
+      text: 'Done',
+    });
+  });
+
+  it('preserves an existing policy terminal when a budget also crosses', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('terminal-1', directoryTools.get, { recordId: 1 }),
+            toolCall('terminal-2', directoryTools.get, { recordId: 2 }),
+          ),
+          11,
+          0,
+        ),
+      ],
+      {
+        policies: {
+          correctionBudget: 0,
+          budget: { maxTokens: 10 },
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(AgentRuntimeError);
+    expect(error.kind).toBe('failure');
+    expect(error.diagnostics.code).not.toBe('budget_exceeded');
+    expect(
+      decisions.find((decision) => decision.decision === 'exceeded')?.detail,
+    ).toMatchObject({
+      terminal: error.diagnostics.code,
+    });
+  });
+
+  it('rejects invalid budget configuration before a provider call', async () => {
+    const subject = runtime([textStep('Done')], {
+      policies: { budget: { maxTokens: 0 } },
+    });
+
+    await expect(subject.instance.invoke(invocation)).rejects.toThrow(
+      'budget.maxTokens',
+    );
+    expect(subject.model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it('parks an approve crossing for quota approval instead of failing', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('park-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(AgentRuntimeError);
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        effectiveLimits: { maxTokens: 10 },
+        limits: [
+          {
+            limitKind: 'tokens',
+            accumulated: 11,
+            limit: 10,
+            stepNumber: 1,
+            completeness: 'complete',
+          },
+        ],
+      },
+      usage: { inputTokens: 11, outputTokens: 0 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+    expect(subject.callTool).toHaveBeenCalledTimes(1);
+    expect(
+      decisions.filter((decision) => decision.rule === 'budget'),
+    ).toMatchObject([{ decision: 'warning' }, { decision: 'exceeded' }]);
+  });
+
+  it('degrades approve to a budget stop on direct execution', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(toolCall('direct-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    const error = await subject.instance
+      .invoke(invocation)
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: { code: 'budget_exceeded' },
+      usage: { inputTokens: 11 },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(1);
+  });
+
+  it('continues under accumulated grants and parks again at the raised limit', async () => {
+    const raise = runtime(
+      [
+        metered(
+          toolStep(toolCall('grant-1', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(textStep('Done'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    // 11 crossed the configured 10, but a 5-token grant raises it to 15.
+    await expect(
+      raise.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 5 },
+      }),
+    ).resolves.toMatchObject({ text: 'Done' });
+
+    const repark = runtime(
+      [
+        metered(
+          toolStep(toolCall('grant-2', directoryTools.get, { recordId: 7 })),
+          11,
+          0,
+        ),
+        metered(
+          toolStep(toolCall('grant-3', directoryTools.get, { recordId: 8 })),
+          10,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      { policies: { budget: { maxTokens: 10, onExceeded: 'approve' } } },
+    );
+
+    const error = await repark.instance
+      .invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 10 },
+      })
+      .catch((cause) => cause);
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens', accumulated: 21, limit: 20 }],
+      },
+    });
+    expect(repark.model.doGenerateCalls).toHaveLength(2);
+  });
+
+  it('applies a grant only to its configured dimension and rejects bad grants', async () => {
+    const unconfigured = runtime([textStep('Done')], {
+      policies: { budget: { maxCostUsd: 0.01, onExceeded: 'approve' } },
+    });
+    await expect(
+      unconfigured.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 5 },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+    expect(unconfigured.model.doGenerateCalls).toHaveLength(0);
+
+    const zero = runtime([textStep('Done')], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+    await expect(
+      zero.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: 0 },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+
+    const overflow = runtime([textStep('Done')], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+    await expect(
+      overflow.instance.invoke({
+        ...invocation,
+        budgetParkable: true,
+        budgetGrants: { maxTokens: Number.MAX_SAFE_INTEGER },
+      }),
+    ).rejects.toMatchObject({ diagnostics: { code: 'invalid_budget_grant' } });
+    expect(overflow.model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it('parks for tokens only when cost is unknown', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('unknown-cost-park', directoryTools.get, { recordId: 7 }),
+          ),
+          11,
+          0,
+        ),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          budget: {
+            maxTokens: 10,
+            maxCostUsd: 0.000001,
+            onExceeded: 'approve',
+          },
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens' }],
+      },
+    });
+    expect(
+      decisions.filter((decision) => decision.decision === 'incomplete'),
+    ).toMatchObject([{ detail: { limitKind: 'costUsd' } }]);
+  });
+
+  it('returns a final answer on an approve crossing without parking', async () => {
+    const subject = runtime([metered(textStep('Done'), 12, 0)], {
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+    });
+
+    await expect(
+      subject.instance.invoke({ ...invocation, budgetParkable: true }),
+    ).resolves.toMatchObject({ text: 'Done' });
+  });
+
+  it('keeps an existing tool approval when a budget also crosses', async () => {
+    const decisions: PolicyDecision[] = [];
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('gated-budget', directoryTools.get, { recordId: 7 }),
+          ),
+          11,
+          0,
+        ),
+      ],
+      {
+        policies: {
+          requireApproval: [directoryTools.get],
+          budget: { maxTokens: 10, onExceeded: 'approve' },
+        },
+        onPolicyDecision: (decision) => decisions.push(decision),
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'failure',
+      diagnostics: {
+        code: 'approval_required',
+        pendingToolCall: { toolName: directoryTools.get },
+      },
+    });
+    expect(error.diagnostics).not.toHaveProperty('budgetRequest');
+    expect(
+      decisions.find(
+        (decision) =>
+          decision.decision === 'exceeded' &&
+          decision.detail?.['terminal'] === 'approval_required',
+      ),
+    ).toBeDefined();
+  });
+
+  it('parks a crossing on a text-only correction', async () => {
+    const subject = runtime(
+      [
+        metered(
+          toolStep(
+            toolCall('correction-park-a', directoryTools.get, { recordId: 1 }),
+            toolCall('correction-park-b', directoryTools.get, { recordId: 2 }),
+          ),
+          1,
+          0,
+        ),
+        metered(textStep('Still correcting'), 9, 0),
+        metered(textStep('Should not run'), 1, 0),
+      ],
+      {
+        policies: {
+          correctionBudget: 2,
+          budget: { maxTokens: 10, onExceeded: 'approve' },
+        },
+      },
+    );
+
+    const error = await subject.instance
+      .invoke({ ...invocation, budgetParkable: true })
+      .catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      kind: 'budget',
+      diagnostics: {
+        code: 'budget_approval_required',
+        limits: [{ limitKind: 'tokens', accumulated: 10, limit: 10 }],
+      },
+    });
+    expect(subject.model.doGenerateCalls).toHaveLength(2);
   });
 
   it('denies a multi-call step before MCP and lets the SDK request one corrected tool', async () => {

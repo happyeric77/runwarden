@@ -15,6 +15,20 @@
       "when": 1794812633156,
       "tag": "0001_invocation_result_messages",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794833627861,
+      "tag": "0002_invocation_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794841859586,
+      "tag": "0003_invocation_budget_approval",
+      "breakpoints": true
     }
   ]
 }

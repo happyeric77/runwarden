@@ -95,9 +95,11 @@ try {
         `[worker] invocation ${invocation.id} failed (${error.message})`,
       );
     },
-    onAwaitingApproval: async (invocation, pendingToolCall) => {
+    onAwaitingApproval: async (invocation, request) => {
       console.log(
-        `[worker] invocation ${invocation.id} awaiting approval for ${pendingToolCall.toolName}`,
+        `[worker] invocation ${invocation.id} awaiting approval for ${
+          request.kind === 'tool' ? request.toolCall.toolName : 'budget quota'
+        }`,
       );
     },
   });

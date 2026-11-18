@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 import { AgentRuntimeError } from '../contracts/errors.js';
 import type {
+  BudgetWarning,
   PolicyDecision,
   RuntimePolicies,
   ToolDefinition,
@@ -36,9 +37,12 @@ import type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePricingOptions,
+  UsageStep,
 } from '../contracts/runtime.js';
 import { deriveToolCallIdempotencyKey } from './canonical-json.js';
 import { PolicyEngine, type ParsedToolCall } from './policy-engine.js';
+import { aggregateUsageSteps, buildUsageStep } from './usage.js';
 
 const TOOL_EXECUTION_CONTRACT = [
   'Tool execution contract:',
@@ -55,9 +59,11 @@ interface AiSdkNativeRuntimeOptions {
   loadSystemPrompt?: SystemPromptLoader;
   loadHistory?: HistoryLoader;
   policies?: RuntimePolicies;
+  pricing?: UsagePricingOptions;
   now?: () => number;
   onMetrics?: (metrics: RuntimeMetrics) => void;
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  onBudgetWarning?: (warning: BudgetWarning) => void;
   onToolCallAudit?: ToolCallAuditSink;
 }
 
@@ -378,8 +384,22 @@ export class AiSdkNativeRuntime implements AgentRuntime {
           invocationId: input.invocationId,
           runId: input.runId,
         }),
+      onBudgetWarning: (warning) => {
+        try {
+          this.options.onBudgetWarning?.({
+            ...warning,
+            scope: input.scope,
+            invocationId: input.invocationId,
+            runId: input.runId,
+          });
+        } catch {
+          // Budget warnings are observational and must not affect execution.
+        }
+      },
       correctionForInvalidCall: (call) => this.correctionFor(call),
       approvedToolCall: input.approvedToolCall,
+      budgetGrants: input.budgetGrants,
+      budgetParkable: input.budgetParkable,
     });
 
     let approvalError: { error: unknown } | undefined;
@@ -403,6 +423,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         .join('\n\n');
 
       const tools = this.createTools(input, startedAt, state, policy);
+      const usageSteps: UsageStep[] = [];
       const agent = new ToolLoopAgent({
         model: this.options.model,
         tools,
@@ -439,6 +460,22 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         },
         onStepEnd: (step) => {
           policy.afterStep(step.toolCalls as ParsedToolCall[]);
+          usageSteps.push(
+            buildUsageStep(
+              {
+                usage: step.usage,
+                provider: normalizeProviderName(step.model.provider),
+                model: step.model.modelId,
+              },
+              this.options.pricing,
+            ),
+          );
+          policy.evaluateBudget(
+            aggregateUsageSteps(usageSteps),
+            usageSteps.length,
+            step.toolCalls.length > 0 ||
+              policy.correctionInstruction() !== undefined,
+          );
         },
         stopWhen: () => policy.terminalError != null,
       });
@@ -464,7 +501,13 @@ export class AiSdkNativeRuntime implements AgentRuntime {
         steps.push(...result.steps);
       }
 
-      if (policy.terminalError) throw policy.terminalError;
+      if (policy.terminalError) {
+        if (policy.terminalError.kind === 'budget') {
+          policy.terminalError.diagnostics.invocationId = input.invocationId;
+          policy.terminalError.diagnostics.runId = input.runId;
+        }
+        throw policy.terminalError;
+      }
       const text = result.text.trim();
       const provider = normalizeProviderName(result.finalStep.model.provider);
       const model = result.finalStep.model.modelId;
@@ -496,6 +539,7 @@ export class AiSdkNativeRuntime implements AgentRuntime {
             producedNeutralMessages(step.response.messages),
           ),
         ],
+        usage: aggregateUsageSteps(usageSteps),
         provider,
         model,
       };

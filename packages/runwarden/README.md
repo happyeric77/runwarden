@@ -210,6 +210,86 @@ policies: {
 The predicate also receives `scope`. Return `true` to require approval; a
 thrown error fails the invocation.
 
+## Budgets
+
+Add a per-execution budget when you want a runaway invocation to stop:
+
+```ts
+const runtime = defineRuntime({
+  // ...
+  policies: {
+    budget: {
+      maxCostUsd: 0.25,
+      maxTokens: 50_000,
+      onExceeded: 'approve', // or 'stop' / 'log'
+    },
+  },
+  onBudgetWarning: (warning) => {
+    console.warn('budget warning', warning);
+  },
+});
+```
+
+Budgets are checked after each completed step. This is a circuit breaker, not
+an exact gate: the step that crosses a limit finishes, including its tool side
+effects, and only the next model call is prevented. One call can therefore
+overshoot the limit. A crossing on the final text step is recorded but the
+answer is still returned.
+
+`maxTokens` counts input, cache read, cache write, output, and reasoning
+tokens. Known token counts are a lower bound when a provider omits usage.
+`maxCostUsd` is enforced only when every step's cost is known and accounting is
+complete; unknown cost is recorded as an incomplete decision and never treated
+as zero. Set `onExceeded: 'log'` to record crossings without stopping.
+
+Budgets emit an 80% warning and a 100% crossing decision. `onBudgetWarning` fires
+once per limit per execution, and observer errors do not affect the invocation.
+A `stop` outcome throws an `AgentRuntimeError` with kind `budget` and code
+`budget_exceeded`, persists the usage accrued through the crossing step, and is
+not retried.
+
+### Approving a budget crossing
+
+With `onExceeded: 'approve'`, a durable invocation parks in
+`awaiting_approval` instead of failing. The pending record appears in
+`listPendingApprovals(scope)` with `pendingApprovalKind: 'budget'` and a
+`pendingBudgetRequest` holding the parked run ID (`requestId`), the crossed
+limits, and the usage snapshot. It never reuses `pendingToolCall`.
+
+```ts
+const [request] = await runtime.listPendingApprovals('billing');
+await runtime.approveInvocation(request.id, {
+  requestId: request.pendingBudgetRequest!.requestId,
+  grant: { maxTokens: 25_000 }, // additional quota, not a new limit
+  resolvedBy: 'quota-team',
+});
+```
+
+Approving requires `grant: { maxTokens?, maxCostUsd? }` and at least one
+dimension. Grants add to the configured limit (`effective = configured +
+accumulated grants`), only apply to dimensions that are configured, and are
+rejected when empty, zero, negative, fractional, non-finite, or overflowing.
+An omitted dimension is unchanged. Approving a tool park with a grant is an
+error; a budget park must supply the `requestId` from the listing, and a stale
+request ID leaves a newer park untouched. Grants stack across parks and ordinary
+execution retries.
+
+Resuming is a fresh whole-run execution with a new run ID: completed tool side
+effects can repeat, and the invocation keeps its ordering key until it settles,
+so later invocations with the same key stay blocked. The resumed run starts with
+a fresh usage accumulator; the parked run's usage and request snapshot stay in
+the `budget / approval_requested` policy decision. Invocation usage columns
+remain a per-run snapshot that the next run overwrites.
+
+Rejecting settles the invocation as `failed` with `budget_exceeded`, preserves
+the park-time usage, and does not retry. If the park's audit write fails, no
+park is published: the invocation fails closed with the crossing usage and does
+not spend again.
+
+`approve` needs the durable runtime because approvals live in Postgres. Direct
+execution, including calling `runtime.engine.invoke` yourself, degrades to
+`stop`: the caller gets `budget_exceeded` with the crossing usage and no park.
+
 ## The full quickstart (from the repo)
 
 ### Requirements
@@ -260,7 +340,9 @@ real model provider), see [examples/durable](examples/durable/README.md).
 6. If a proposed call requires approval under `requireApproval`, the invocation
    parks in `awaiting_approval` instead of failing. Your app resolves it
    with `approveInvocation` or `rejectInvocation`. Approval reruns the
-   whole invocation; rejection cancels it.
+   whole invocation; rejection cancels it. A budget crossing with
+   `onExceeded: 'approve'` parks the same way, but approval takes a quota
+   grant and rejection fails with `budget_exceeded` instead.
 7. When an invocation reaches a terminal state (succeeded, failed, or
    cancelled), the optional `onInvocationSettled` callback from
    `defineRuntime` fires with the final invocation record, so your app
@@ -296,6 +378,8 @@ erDiagram
         uuid active_run_id
         timestamptz active_run_registered_at
         jsonb pending_tool_call
+        jsonb pending_budget_request
+        jsonb budget_grants
         timestamptz started_at
         timestamptz completed_at
         timestamptz failed_at

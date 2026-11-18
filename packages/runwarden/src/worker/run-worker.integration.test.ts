@@ -27,7 +27,9 @@ import {
 } from '../db/test-postgres.js';
 import { defineRuntime, RUNTIME_INTERNALS } from '../define-runtime.js';
 import { FakeAgentRuntime } from '../fake-runtime.js';
+import { emptyInvocationUsage } from '../runtime/usage.js';
 import { runWorker } from './run-worker.js';
+import { fakeMcpClient, finishStep } from './test-helpers.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -114,6 +116,7 @@ describe('runWorker', () => {
           runId: 'run',
           text: `done ${input.prompt}`,
           messages: [],
+          usage: emptyInvocationUsage(),
         };
       },
     };
@@ -178,6 +181,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'a',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -201,6 +205,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'b',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -250,6 +255,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'retried',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -302,6 +308,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'audited',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -368,6 +375,7 @@ describe('runWorker', () => {
                 runId: input.runId,
                 text: 'not committed',
                 messages: [],
+                usage: emptyInvocationUsage(),
               };
             },
           },
@@ -391,6 +399,217 @@ describe('runWorker', () => {
       }
     },
   );
+
+  it('preserves a budget stop and its usage when audit persistence fails', async () => {
+    await handle.pool.query(
+      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+    );
+    let listener: ((decision: PolicyDecision) => void) | undefined;
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-audit-budget',
+      prompt: 'budget',
+      maxAttempts: 3,
+    });
+    const usage = {
+      ...emptyInvocationUsage(),
+      inputTokens: 6,
+      outputTokens: 5,
+      costIncomplete: true,
+      steps: [
+        {
+          provider: 'mock-provider',
+          model: 'mock-model',
+          inputTokens: 6,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          usageKnown: true,
+          costKnown: false,
+        },
+      ],
+    };
+    const worker = runWorker({
+      db: handle,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+      runtime: {
+        [RUNTIME_INTERNALS]: {
+          onPolicyDecision(callback) {
+            listener = callback;
+            return () => {
+              listener = undefined;
+            };
+          },
+        },
+        engine: {
+          async invoke(input) {
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'warning',
+              detail: { limitKind: 'tokens', accumulated: 6, limit: 10 },
+            });
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'exceeded',
+              detail: { limitKind: 'tokens', accumulated: 11, limit: 10 },
+            });
+            throw new AgentRuntimeError(
+              'budget',
+              'Invocation budget exceeded',
+              {
+                code: 'budget_exceeded',
+                limits: [
+                  {
+                    limitKind: 'tokens',
+                    accumulated: 11,
+                    limit: 10,
+                    stepNumber: 1,
+                    completeness: 'complete',
+                  },
+                ],
+              },
+              { usage },
+            );
+          },
+        },
+      },
+    });
+    try {
+      await waitFor(
+        async () =>
+          (await getInvocationRowById(handle.db, invocationId))?.status ===
+          'failed',
+      );
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row?.lastErrorCode).toBe('budget_exceeded');
+      expect(row?.attemptCount).toBe(1);
+      expect(row?.inputTokens).toBe(6);
+      expect(row?.outputTokens).toBe(5);
+      expect(row?.usageSteps).toEqual(usage.steps);
+      const decisions = await handle.pool.query(
+        'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+        [invocationId],
+      );
+      expect(decisions.rows[0].count).toBe(0);
+    } finally {
+      await worker.stop();
+      await handle.pool.query(
+        'drop trigger reject_audit on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.reject_audit()');
+    }
+  });
+
+  it('fails closed instead of parking when the crossing audit cannot persist', async () => {
+    await handle.pool.query(
+      `create function agent_runtime.reject_audit() returns trigger language plpgsql as $$ begin raise exception 'audit unavailable'; end $$`,
+    );
+    await handle.pool.query(
+      'create trigger reject_audit before insert on agent_runtime.policy_decisions for each row execute function agent_runtime.reject_audit()',
+    );
+    let listener: ((decision: PolicyDecision) => void) | undefined;
+    const { invocationId } = await enqueueInvocation(handle.db, {
+      scope: 'scope-audit-budget-park',
+      prompt: 'budget',
+      maxAttempts: 3,
+    });
+    const usage = {
+      ...emptyInvocationUsage(),
+      inputTokens: 6,
+      outputTokens: 5,
+      costIncomplete: true,
+      steps: [
+        {
+          provider: 'mock-provider',
+          model: 'mock-model',
+          inputTokens: 6,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          usageKnown: true,
+          costKnown: false,
+        },
+      ],
+    };
+    const worker = runWorker({
+      db: handle,
+      pollIdleMs: 10,
+      pollActiveMs: 10,
+      runtime: {
+        [RUNTIME_INTERNALS]: {
+          onPolicyDecision(callback) {
+            listener = callback;
+            return () => {
+              listener = undefined;
+            };
+          },
+        },
+        engine: {
+          async invoke(input) {
+            listener?.({
+              ...input,
+              rule: 'budget',
+              decision: 'exceeded',
+              detail: { limitKind: 'tokens', accumulated: 11, limit: 10 },
+            });
+            throw new AgentRuntimeError(
+              'budget',
+              'Budget approval required',
+              {
+                code: 'budget_approval_required',
+                limits: [
+                  {
+                    limitKind: 'tokens',
+                    accumulated: 11,
+                    limit: 10,
+                    stepNumber: 1,
+                    completeness: 'complete',
+                  },
+                ],
+              },
+              { usage },
+            );
+          },
+        },
+      },
+    });
+    try {
+      await waitFor(
+        async () =>
+          (await getInvocationRowById(handle.db, invocationId))?.status ===
+          'failed',
+      );
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row).toMatchObject({
+        status: 'failed',
+        lastErrorCode: 'audit_persistence_failed',
+        pendingBudgetRequest: null,
+        inputTokens: 6,
+        outputTokens: 5,
+      });
+      expect(
+        (
+          await handle.pool.query(
+            'select count(*)::int as count from agent_runtime.policy_decisions where invocation_id=$1',
+            [invocationId],
+          )
+        ).rows[0].count,
+      ).toBe(0);
+    } finally {
+      await worker.stop();
+      await handle.pool.query(
+        'drop trigger reject_audit on agent_runtime.policy_decisions',
+      );
+      await handle.pool.query('drop function agent_runtime.reject_audit()');
+    }
+  });
 
   it('discards a late result after heartbeat reports lost ownership', async () => {
     const { invocationId } = await enqueueInvocation(handle.db, {
@@ -418,6 +637,7 @@ describe('runWorker', () => {
               runId: input.runId,
               text: 'late',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },
@@ -698,6 +918,903 @@ describe('durable defineRuntime', () => {
     }
   });
 
+  it('persists usage totals and per-step detail for a durable invocation', async () => {
+    const listResult =
+      '[{"type":"text","text":"1: booking one, 2: booking two"}]';
+    const mcp = fakeMcpClient(listResult);
+    const stepUsage = {
+      inputTokens: {
+        total: 10,
+        noCache: 4,
+        cacheRead: 3,
+        cacheWrite: 3,
+      },
+      outputTokens: { total: 6, text: 4, reasoning: 2 },
+    };
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('1: booking one')) {
+          return finishStep(
+            [{ type: 'text', text: 'Found two bookings.' }],
+            stepUsage,
+          );
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'usage-durable',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          stepUsage,
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      pricing: {
+        overrides: [
+          {
+            model: 'mock-model',
+            inputPerMillionTokens: 1,
+            outputPerMillionTokens: 2,
+            cacheReadPerMillionTokens: 0.5,
+            cacheWritePerMillionTokens: 0.25,
+          },
+        ],
+      },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-usage', prompt: 'List my tasks' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.usage).toMatchObject({
+        inputTokens: 8,
+        outputTokens: 8,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 6,
+        reasoningTokens: 4,
+        costIncomplete: false,
+      });
+      expect(result.usage.costUsd).toBeCloseTo(0.0000365, 12);
+      expect(result.usage.steps).toHaveLength(2);
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({
+        inputTokens: 8,
+        outputTokens: 8,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 6,
+        reasoningTokens: 4,
+      });
+      expect(row?.costUsd).toBeCloseTo(0.0000365, 12);
+      expect(row?.usageSteps).toEqual(result.usage.steps);
+
+      const readBack = await runtime.waitForInvocation(result.invocationId, {
+        pollIntervalMs: 10,
+        waitTimeoutMs: 1_000,
+      });
+      expect(readBack.usage).toEqual(result.usage);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('stops a durable invocation on a token budget and persists usage without retry', async () => {
+    const mcp = fakeMcpClient(
+      '[{"type":"text","text":"1: booking one, 2: booking two"}]',
+    );
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        modelCalls += 1;
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('1: booking one')) {
+          return finishStep([{ type: 'text', text: 'Should not be reached.' }]);
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-durable',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10 } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      let caught: unknown;
+      try {
+        await runtime.invoke(
+          {
+            scope: 'scope-durable-budget',
+            prompt: 'List my tasks',
+            maxAttempts: 3,
+          },
+          { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(AgentRuntimeError);
+      const error = caught as AgentRuntimeError;
+      expect(error.kind).toBe('budget');
+      expect(error.diagnostics).toMatchObject({
+        code: 'budget_exceeded',
+        invocationId: expect.any(String),
+        runId: expect.any(String),
+      });
+      expect(error.usage).toMatchObject({
+        inputTokens: 6,
+        outputTokens: 5,
+        costIncomplete: true,
+      });
+      expect(error.usage?.steps).toHaveLength(1);
+
+      const invocationId = error.diagnostics.invocationId as string;
+      const row = await getInvocationRowById(handle.db, invocationId);
+      expect(row).toMatchObject({
+        status: 'failed',
+        attemptCount: 1,
+        inputTokens: 6,
+        outputTokens: 5,
+        lastErrorCode: 'budget_exceeded',
+      });
+      expect(row?.usageSteps).toEqual(error.usage?.steps);
+      expect(modelCalls).toBe(1);
+      expect(mcp.calls()).toBe(1);
+
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+         where invocation_id = $1 and rule = 'budget'
+         order by id`,
+        [invocationId],
+      );
+      expect(decisions.rows.map((decision) => decision.decision)).toEqual(
+        expect.arrayContaining(['warning', 'exceeded']),
+      );
+
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 10,
+          waitTimeoutMs: 1_000,
+        }),
+      ).rejects.toMatchObject({
+        kind: 'budget',
+        diagnostics: {
+          code: 'budget_exceeded',
+          invocationId,
+        },
+        usage: error.usage,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('parks a durable budget crossing and resumes with an approved grant', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const settled: InvocationRecord[] = [];
+    const parkedRequests: Array<{ kind: string }> = [];
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        modelCalls += 1;
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('task result')) {
+          return finishStep([{ type: 'text', text: 'Done.' }], {
+            inputTokens: { total: 1, noCache: 1 },
+            outputTokens: { total: 1, text: 1 },
+          });
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-park',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+      onInvocationSettled: (record) => {
+        settled.push(record);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+      onAwaitingApproval: async (_record, request) => {
+        parkedRequests.push({ kind: request.kind });
+      },
+    });
+    try {
+      const parked = await runtime.enqueue({
+        scope: 'scope-budget-approval',
+        prompt: 'List my tasks',
+        maxAttempts: 1,
+        orderingKey: 'budget-order',
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(parked.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const parkedRow = await getInvocationRowById(
+        handle.db,
+        parked.invocationId,
+      );
+      expect(parkedRow).toMatchObject({
+        status: 'awaiting_approval',
+        attemptCount: 0,
+        inputTokens: 6,
+        outputTokens: 5,
+        pendingToolCall: null,
+        budgetGrants: null,
+      });
+      expect(parkedRow?.pendingBudgetRequest).toMatchObject({
+        requestId: parkedRow?.activeRunId,
+        limits: [{ limitKind: 'tokens', accumulated: 11, limit: 10 }],
+        usage: { inputTokens: 6, outputTokens: 5 },
+      });
+      expect(parkedRow?.pendingBudgetRequest?.requestId).toBe(
+        parkedRow?.activeRunId,
+      );
+      const parkedRunId = parkedRow!.activeRunId!;
+      expect(parkedRequests).toEqual([{ kind: 'budget' }]);
+      expect(settled).toHaveLength(0);
+      expect(modelCalls).toBe(1);
+      expect(mcp.calls()).toBe(1);
+
+      const pending = await runtime.listPendingApprovals(
+        'scope-budget-approval',
+      );
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        id: parked.invocationId,
+        pendingApprovalKind: 'budget',
+        pendingBudgetRequest: { requestId: parkedRunId },
+      });
+      expect(pending[0]?.pendingToolCall).toBeUndefined();
+
+      const follower = await runtime.enqueue({
+        scope: 'scope-budget-approval',
+        prompt: 'Follower',
+        orderingKey: 'budget-order',
+      });
+      await sleep(150);
+      expect((await runtime.getInvocation(follower.invocationId))?.status).toBe(
+        'pending',
+      );
+
+      await expect(
+        runtime.approveInvocation(parked.invocationId, {
+          grant: { maxTokens: 5 },
+        }),
+      ).rejects.toMatchObject({
+        diagnostics: { code: 'approval_request_stale' },
+      });
+      expect((await runtime.getInvocation(parked.invocationId))?.status).toBe(
+        'awaiting_approval',
+      );
+
+      const approved = await runtime.approveInvocation(parked.invocationId, {
+        grant: { maxTokens: 5 },
+        requestId: parkedRunId,
+        resolvedBy: 'admin-1',
+      });
+      expect(approved.status).toBe('pending');
+      expect(approved.budgetGrants).toEqual({ maxTokens: 5 });
+
+      const result = await runtime.waitForInvocation(parked.invocationId, {
+        pollIntervalMs: 20,
+        waitTimeoutMs: 30_000,
+      });
+      expect(result.text).toBe('Done.');
+      const finished = await getInvocationRowById(
+        handle.db,
+        parked.invocationId,
+      );
+      expect(finished).toMatchObject({
+        status: 'succeeded',
+        attemptCount: 1,
+        budgetGrants: { maxTokens: 5 },
+        pendingBudgetRequest: null,
+      });
+      expect(finished?.activeRunId).not.toBe(parkedRunId);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: parked.invocationId,
+        status: 'succeeded',
+      });
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+          where invocation_id = $1 and rule = 'budget' order by id`,
+        [parked.invocationId],
+      );
+      expect(
+        decisions.rows
+          .map((row) => row.decision)
+          .filter(
+            (decision) => decision !== 'warning' && decision !== 'exceeded',
+          ),
+      ).toEqual(['approval_requested', 'approved']);
+
+      // The ordering key stays held until settlement; the follower now parks.
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(follower.invocationId))?.status ===
+          'awaiting_approval',
+      );
+      expect(modelCalls).toBe(4);
+      expect(mcp.calls()).toBe(3);
+      const followerRow = await getInvocationRowById(
+        handle.db,
+        follower.invocationId,
+      );
+      await runtime.rejectInvocation(follower.invocationId, {
+        requestId: followerRow!.pendingBudgetRequest!.requestId,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('rejects a durable budget park without retrying and keeps park usage', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const settled: InvocationRecord[] = [];
+    let modelCalls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-reject',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+      onInvocationSettled: (record) => {
+        settled.push(record);
+      },
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-budget-reject',
+        prompt: 'List my tasks',
+        maxAttempts: 3,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const parked = await getInvocationRowById(handle.db, invocationId);
+      const rejected = await runtime.rejectInvocation(invocationId, {
+        requestId: parked!.pendingBudgetRequest!.requestId,
+        note: 'quota denied',
+      });
+      expect(rejected).toMatchObject({
+        status: 'failed',
+        lastErrorCode: 'budget_exceeded',
+        lastErrorMessage: 'quota denied',
+      });
+      expect(await getInvocationRowById(handle.db, invocationId)).toMatchObject(
+        { inputTokens: 6, outputTokens: 5, pendingBudgetRequest: null },
+      );
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 10,
+          waitTimeoutMs: 1_000,
+        }),
+      ).rejects.toMatchObject({
+        kind: 'budget',
+        diagnostics: { code: 'budget_exceeded' },
+        usage: { inputTokens: 6, outputTokens: 5 },
+      });
+      await sleep(250);
+      expect(modelCalls).toBe(1);
+      // Parking handed the claim back; rejection must not requeue or spend it.
+      expect(
+        (await getInvocationRowById(handle.db, invocationId))?.attemptCount,
+      ).toBe(0);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toMatchObject({
+        id: invocationId,
+        status: 'failed',
+        lastErrorCode: 'budget_exceeded',
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('parks again when a resumed run crosses its raised limit', async () => {
+    const mcp = fakeMcpClient('[{"type":"text","text":"task result"}]');
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        if (promptText.includes('task result')) {
+          return finishStep([{ type: 'text', text: 'Done.' }], {
+            inputTokens: { total: 1, noCache: 1 },
+            outputTokens: { total: 1, text: 1 },
+          });
+        }
+        return finishStep(
+          [
+            {
+              type: 'tool-call',
+              toolCallId: 'budget-repark',
+              toolName: 'tasks__list_scheduled',
+              input: JSON.stringify({ query_mode: 'upcoming' }),
+            },
+          ],
+          {
+            inputTokens: { total: 6, noCache: 6 },
+            outputTokens: { total: 5, text: 5 },
+          },
+        );
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: mcp.client,
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      policies: { budget: { maxTokens: 10, onExceeded: 'approve' } },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 20,
+      pollActiveMs: 10,
+    });
+    try {
+      const { invocationId } = await runtime.enqueue({
+        scope: 'scope-budget-repark',
+        prompt: 'List my tasks',
+        maxAttempts: 1,
+      });
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const firstPark = await getInvocationRowById(handle.db, invocationId);
+      const firstRunId = firstPark!.pendingBudgetRequest!.requestId;
+      await runtime.approveInvocation(invocationId, {
+        grant: { maxTokens: 1 },
+        requestId: firstRunId,
+      });
+
+      // The 11-token step now equals the raised 11-token limit and parks again.
+      await waitFor(
+        async () =>
+          (await runtime.getInvocation(invocationId))?.status ===
+          'awaiting_approval',
+      );
+      const secondPark = await getInvocationRowById(handle.db, invocationId);
+      const secondRunId = secondPark!.pendingBudgetRequest!.requestId;
+      expect(secondRunId).not.toBe(firstRunId);
+      expect(secondPark?.budgetGrants).toEqual({ maxTokens: 1 });
+      expect(secondPark?.pendingBudgetRequest?.limits).toMatchObject([
+        { accumulated: 11, limit: 11 },
+      ]);
+      await runtime.approveInvocation(invocationId, {
+        grant: { maxTokens: 10 },
+        requestId: secondRunId,
+      });
+      await expect(
+        runtime.waitForInvocation(invocationId, {
+          pollIntervalMs: 20,
+          waitTimeoutMs: 30_000,
+        }),
+      ).resolves.toMatchObject({ text: 'Done.' });
+      const finished = await getInvocationRowById(handle.db, invocationId);
+      expect(finished).toMatchObject({
+        status: 'succeeded',
+        budgetGrants: { maxTokens: 11 },
+        attemptCount: 1,
+      });
+      const decisions = await handle.pool.query<{ decision: string }>(
+        `select decision from agent_runtime.policy_decisions
+          where invocation_id = $1 and rule = 'budget' order by id`,
+        [invocationId],
+      );
+      expect(
+        decisions.rows
+          .map((row) => row.decision)
+          .filter(
+            (decision) => decision !== 'warning' && decision !== 'exceeded',
+          ),
+      ).toEqual([
+        'approval_requested',
+        'approved',
+        'approval_requested',
+        'approved',
+      ]);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('completes successfully when provider usage contains invalid token counts', async () => {
+    const model = new MockLanguageModelV4({
+      modelId: 'invalid-usage-model',
+      doGenerate: async () => ({
+        content: [{ type: 'text', text: 'Still completed.' }] as never,
+        finishReason: { unified: 'stop', raw: 'stop' } as const,
+        usage: {
+          inputTokens: {
+            total: Number.NaN,
+            noCache: 1.5,
+            cacheRead: -1,
+            cacheWrite: 0,
+          },
+          outputTokens: { total: 2, text: 2, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-invalid-usage', prompt: 'Finish anyway' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.text).toBe('Still completed.');
+      expect(result.usage).toMatchObject({
+        inputTokens: 0,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costIncomplete: true,
+      });
+      expect(result.usage).not.toHaveProperty('costUsd');
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({
+        status: 'succeeded',
+        inputTokens: 0,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costUsd: null,
+      });
+      expect(row?.usageSteps?.[0]).toMatchObject({
+        usageKnown: false,
+        costKnown: false,
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('completes when aggregate token totals overflow and marks usage incomplete', async () => {
+    const max = Number.MAX_SAFE_INTEGER;
+    const stepUsage = {
+      inputTokens: {
+        total: max,
+        noCache: max,
+        cacheRead: 0,
+        cacheWrite: 0,
+      },
+      outputTokens: { total: 0, text: 0, reasoning: 0 },
+    };
+    const model = new MockLanguageModelV4({
+      modelId: 'token-overflow-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: stepUsage,
+          warnings: [],
+        });
+        if (promptText.includes('1: booking one')) {
+          return finish([{ type: 'text', text: 'Found two bookings.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'token-overflow',
+            toolName: 'tasks__list_scheduled',
+            input: JSON.stringify({ query_mode: 'upcoming' }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: {
+        async open() {
+          return {
+            async callTool() {
+              return '[{"type":"text","text":"1: booking one, 2: booking two"}]';
+            },
+            async close() {},
+          };
+        },
+      },
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      pricing: {
+        overrides: [
+          {
+            model: 'token-overflow-model',
+            inputPerMillionTokens: 0,
+            outputPerMillionTokens: 0,
+          },
+        ],
+      },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-token-overflow', prompt: 'List my tasks' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.usage).toMatchObject({
+        inputTokens: max,
+        costUsd: 0,
+        costIncomplete: true,
+      });
+      expect(result.usage.steps.every((step) => step.costKnown)).toBe(true);
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({
+        status: 'succeeded',
+        inputTokens: max,
+        costUsd: 0,
+      });
+      expect(row?.usageSteps).toEqual(result.usage.steps);
+
+      const readBack = await runtime.waitForInvocation(result.invocationId, {
+        pollIntervalMs: 10,
+        waitTimeoutMs: 1_000,
+      });
+      expect(readBack.usage).toEqual(result.usage);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it('keeps durable cost incomplete when aggregate cost overflows', async () => {
+    const stepUsage = {
+      inputTokens: {
+        total: 1_000_000,
+        noCache: 1_000_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      },
+      outputTokens: { total: 1, text: 1, reasoning: 0 },
+    };
+    const model = new MockLanguageModelV4({
+      modelId: 'cost-overflow-model',
+      doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
+        const finish = (content: unknown[]) => ({
+          content: content as never,
+          finishReason: { unified: 'stop', raw: 'stop' } as const,
+          usage: stepUsage,
+          warnings: [],
+        });
+        if (promptText.includes('1: booking one')) {
+          return finish([{ type: 'text', text: 'Completed.' }]);
+        }
+        return finish([
+          {
+            type: 'tool-call',
+            toolCallId: 'cost-overflow',
+            toolName: 'tasks__list_scheduled',
+            input: JSON.stringify({ query_mode: 'upcoming' }),
+          },
+        ]);
+      },
+    });
+    const runtime = defineRuntime({
+      db: handle,
+      model,
+      mcpClient: {
+        async open() {
+          return {
+            async callTool() {
+              return '[{"type":"text","text":"1: booking one"}]';
+            },
+            async close() {},
+          };
+        },
+      },
+      tools: [
+        {
+          name: 'tasks__list_scheduled',
+          description: 'List scheduled tasks.',
+          inputSchema: z.object({ query_mode: z.string() }),
+        },
+      ],
+      pricing: {
+        overrides: [
+          {
+            model: 'cost-overflow-model',
+            inputPerMillionTokens: 600_000_000_000_000_000,
+            outputPerMillionTokens: 0,
+          },
+        ],
+      },
+      loadSystemPrompt: async () => 'You are a helpful task assistant.',
+      loadHistory: async () => [],
+    });
+    const worker = runWorker({
+      runtime,
+      db: handle,
+      pollIdleMs: 50,
+      pollActiveMs: 10,
+    });
+    try {
+      const result = await runtime.invoke(
+        { scope: 'scope-durable-cost-overflow', prompt: 'Finish' },
+        { pollIntervalMs: 50, waitTimeoutMs: 30_000 },
+      );
+
+      expect(result.usage).toMatchObject({ costIncomplete: true });
+      expect(result.usage).not.toHaveProperty('costUsd');
+      expect(result.usage.steps.every((step) => step.costKnown)).toBe(true);
+
+      const row = await getInvocationRowById(handle.db, result.invocationId);
+      expect(row).toMatchObject({ status: 'succeeded', costUsd: null });
+
+      const readBack = await runtime.waitForInvocation(result.invocationId, {
+        pollIntervalMs: 10,
+        waitTimeoutMs: 1_000,
+      });
+      expect(readBack.usage).toEqual(result.usage);
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it('returns no messages for a row stored before result_messages existed', async () => {
     const runtime = defineRuntime({
       db: handle,
@@ -742,6 +1859,15 @@ describe('durable defineRuntime', () => {
     });
     expect(result.text).toBe('legacy result');
     expect(result.messages).toEqual([]);
+    expect(result.usage).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costIncomplete: true,
+      steps: [],
+    });
   });
 });
 
@@ -2359,6 +3485,7 @@ describe('tool call audits', () => {
             runId: input.runId,
             text: 'Done',
             messages: [],
+            usage: emptyInvocationUsage(),
           };
         },
       },
@@ -2437,6 +3564,7 @@ describe('tool call audits', () => {
               runId: input.runId,
               text: 'must not succeed',
               messages: [],
+              usage: emptyInvocationUsage(),
             };
           },
         },

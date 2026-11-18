@@ -22,12 +22,15 @@ export {
 
 export type {
   AgentRuntime,
+  AwaitingApprovalRequest,
+  BudgetRequest,
   HistoryLoader,
   InvocationInput,
   InvocationRecord,
   InvocationResult,
   InvocationSettledListener,
   InvocationStatus,
+  InvocationUsage,
   McpToolClient,
   McpToolSession,
   NeutralContentPart,
@@ -42,13 +45,24 @@ export type {
   SystemPromptLoader,
   ToolCallAuditEvent,
   ToolCallAuditSink,
+  UsagePriceOverride,
+  UsagePricingOptions,
+  UsageStep,
+  UsageTokenCounts,
 } from './contracts/runtime.js';
 
 export type {
+  BudgetCompleteness,
+  BudgetExceededLimit,
+  BudgetGrant,
+  BudgetLimitKind,
+  BudgetWarning,
+  BudgetWarningEvent,
   McpServerConfig,
   PolicyDecision,
   PolicyDecisionKind,
   PolicyRule,
+  RuntimeBudgetPolicy,
   RuntimePolicies,
   ToolDefinition,
 } from './contracts/policy.js';
